@@ -15,9 +15,27 @@ spec:
         name: mongo
     spec:
       serviceAccount: pacman-sa
+      serviceAccountName: pacman-sa
       containers:
-      - image: mongo
+      - image: centos/mongodb-36-centos7
         name: mongo
+        env:
+        - name: MONGODB_ADMIN_PASSWORD
+          value: clyde
+        - name: MONGODB_DATABASE
+          value: pacman
+        - name: MONGODB_PASSWORD
+          value: pinky
+        - name: MONGODB_USER
+          value: blinky
+        readinessProbe:
+          exec:
+           command:
+            - /bin/sh
+            - -i
+            - -c
+            - mongo 127.0.0.1:27017/$MONGODB_DATABASE -u $MONGODB_USER -p $MONGODB_PASSWORD
+              --eval="quit()"
         ports:
         - name: mongo
           containerPort: 27017

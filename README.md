@@ -1,4 +1,4 @@
-# Running Pac-Man on Tanzu Kubernetes Grid Clusters
+# pacman-tanzu
 Pac-Man the classic arcade game - deployment files for VMware Tanzu Kubernetes
 
 # Pre-Reqs
@@ -7,9 +7,10 @@ ServiceType: LoadBalancer must be available for external connectivity to the Pac
 
 # Install
 
-Clone repo and run the "pacman-install.sh" file or the following steps
+Clone repo
 
 > kubectl create namespace pacman
+
 > kubectl create -f pacman-tanzu/
 
 # Source
