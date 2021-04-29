@@ -14,7 +14,7 @@ spec:
       labels:
         name: mongo
     spec:
-      ServiceAccount: pacman-sa
+      serviceAccount: pacman-sa
       containers:
       - image: mongo
         name: mongo
