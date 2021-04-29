@@ -10,6 +10,7 @@ ServiceType: LoadBalancer must be available for external connectivity to the Pac
 Clone repo and run the "pacman-install.sh" file or the following steps
 
 > kubectl create namespace pacman
+> 
 > kubectl create -f pacman-tanzu/
 
 # Source
