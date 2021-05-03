@@ -21,8 +21,8 @@ spec:
            - pipefail
            - -c
            - |
-             # create a bcakup action on the project 
-             backup_name="mysqlapp-backup-$(date| tr ' ' '-'|tr ':' '-'|tr '[:upper:]' '[:lower:]')"
+             # create a backup action on the project 
+             backup_name="pacman-backup-$(date| tr ' ' '-'|tr ':' '-'|tr '[:upper:]' '[:lower:]')"
              cat <<EOF | kubectl create -f -
              apiVersion: actions.kio.kasten.io/v1alpha1
              kind: BackupAction
