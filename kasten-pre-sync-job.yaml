@@ -37,7 +37,7 @@ spec:
              EOF
             
              # Wait until the backucp action is complete 
-             count=15
+             count=60
              delay=3
              total_time=$((count*delay))
              while true 
