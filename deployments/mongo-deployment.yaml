@@ -14,8 +14,6 @@ spec:
       labels:
         name: mongo
     spec:
-      serviceAccount: pacman-sa
-      serviceAccountName: pacman-sa
       containers:
       - image: centos/mongodb-36-centos7
         name: mongo

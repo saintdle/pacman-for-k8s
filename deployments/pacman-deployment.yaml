@@ -14,7 +14,6 @@ spec:
       labels:
         name: pacman
     spec:
-      serviceAccount: pacman-sa
       containers:
       - image: quay.io/ifont/pacman-nodejs-app:latest
         name: pacman
@@ -43,7 +42,6 @@ spec:
           valueFrom:
             fieldRef:
               apiVersion: v1
-              fieldPath: spec.nodeName
-        ports:
+              fieldPath: spec.nodeName        ports:
         - containerPort: 8080
           name: http-server
