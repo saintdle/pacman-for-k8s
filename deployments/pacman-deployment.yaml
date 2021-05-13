@@ -42,6 +42,8 @@ spec:
           valueFrom:
             fieldRef:
               apiVersion: v1
-              fieldPath: spec.nodeName        ports:
+              fieldPath: spec.nodeName        
+        ports:
         - containerPort: 8080
           name: http-server
+          protocol: TCP
