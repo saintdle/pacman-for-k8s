@@ -17,6 +17,10 @@ spec:
       containers:
       - image: quay.io/ifont/pacman-nodejs-app:latest
         name: pacman
+        ports:
+        - containerPort: 8080
+          name: http-server
+          protocol: TCP
         env:
         - name: MONGO_SERVICE_HOST
           value: mongo
@@ -43,7 +47,3 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: spec.nodeName        
-          ports:
-          - containerPort: 8080
-            name: http-server
-            protocol: TCP
