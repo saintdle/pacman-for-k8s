@@ -4,6 +4,8 @@ metadata:
   labels:
     name: pacman
   name: pacman
+  annotations:
+    source: "https://github.com/saintdle/pacman-tanzu"
 spec:
   replicas: 1
   selector:
@@ -46,4 +48,4 @@ spec:
           valueFrom:
             fieldRef:
               apiVersion: v1
-              fieldPath: spec.nodeName        
+              fieldPath: spec.nodeName
