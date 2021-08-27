@@ -1,4 +1,4 @@
-## Running Pac-Man on Tanzu Kubernetes Grid Clusters
+## Running Pac-Man on Kubernetes
 Pac-Man the classic arcade game - deployment files for VMware Tanzu Kubernetes
 
 ## Pre-Reqs
@@ -22,3 +22,5 @@ These are modified files from the below github repo for the node.js version, whi
 > https://github.com/font/k8s-example-apps/tree/master/pacman-nodejs-app
 
 Security changes to the deployment such as setting up mongodb auth were thanks to [Dav1x](https://github.com/dav1x/) you can find his [Pac-Man deployment for OpenShift here](https://github.com/dav1x/pacman-ocp). 
+
+
