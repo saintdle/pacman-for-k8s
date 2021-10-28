@@ -17,6 +17,11 @@ or the following steps:
     kubectl create namespace pacman
     kubectl create -n pacman -f pacman-tanzu/
 
+## Uninstall
+Run file `./pacman-uninstall.sh`. This will delete all objects created by `./pacman-install.sh`
+
+Alternatively, run `./pacman-uninstall.sh keeppvc`. This will delete all objects except for the pacman namespace and the persistent volume claim. You can use this to demonstrate persistence of the MongoDB data by installing, playing a game and recording a high score, then unininstalling with the `keeppvc` argument. You can then run the installation again and the high score will persist.
+
 ## Architecture
 
 The application is made up of the following components:
