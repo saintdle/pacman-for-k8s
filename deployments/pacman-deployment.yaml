@@ -23,6 +23,14 @@ spec:
         - containerPort: 8080
           name: http-server
           protocol: TCP
+        livenessProbe:
+          httpGet:
+            path: /
+            port: http
+        readinessProbe:
+          httpGet:
+            path: /
+            port: http
         env:
         - name: MONGO_SERVICE_HOST
           value: mongo

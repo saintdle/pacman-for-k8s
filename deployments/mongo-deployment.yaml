@@ -39,7 +39,6 @@ spec:
       schedulerName: default-scheduler
       securityContext:
         fsGroup: 1001
-      serviceAccount: default
       serviceAccountName: default
       terminationGracePeriodSeconds: 30
       volumes:
@@ -84,7 +83,3 @@ spec:
         volumeMounts:
           - name: mongo-db
             mountPath: /bitnami/mongodb/
-      volumes:
-        - name: mongo-db
-          persistentVolumeClaim:
-            claimName: mongo-storage

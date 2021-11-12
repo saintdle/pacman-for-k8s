@@ -10,6 +10,17 @@ ServiceType: LoadBalancer must be available for external connectivity to the Pac
 
 ## Install
 
+### Using Helm to install
+````
+kubectl create namespace pacman
+
+helm repo add veducate https://saintdle.github.io/helm-charts/
+helm install pacman veducate/pacman -n pacman
+
+# You can see the available values by running
+helm show values veducate/pacman
+````
+### Using a Script for installation
 Clone repo and run ```chmod +X pacman-install.sh``` and then run file ```./pacman-install.sh```
 
 or the following steps:
@@ -17,7 +28,7 @@ or the following steps:
     kubectl create namespace pacman
     kubectl create -n pacman -f pacman-tanzu/
 
-## Uninstall
+#### Uninstall
 Run file `./pacman-uninstall.sh`. This will delete all objects created by `./pacman-install.sh`
 
 Alternatively, run `./pacman-uninstall.sh keeppvc`. This will delete all objects except for the pacman namespace and the persistent volume claim. You can use this to demonstrate persistence of the MongoDB data by installing, playing a game and recording a high score, then unininstalling with the `keeppvc` argument. You can then run the installation again and the high score will persist.
