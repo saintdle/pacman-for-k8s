@@ -26,11 +26,11 @@ spec:
         livenessProbe:
           httpGet:
             path: /
-            port: http
+            port: 8080
         readinessProbe:
           httpGet:
             path: /
-            port: http
+            port: 8080
         env:
         - name: MONGO_SERVICE_HOST
           value: mongo
