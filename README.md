@@ -20,6 +20,8 @@ helm install pacman veducate/pacman -n pacman
 # You can see the available values by running
 helm show values veducate/pacman
 ````
+[Read this blog post](https://veducate.co.uk/how-to-create-helm-chart/) to learn how this Helm Chart was created.
+
 ### Using a Script for installation
 Clone repo and run ```chmod +X pacman-install.sh``` and then run file ```./pacman-install.sh```
 
