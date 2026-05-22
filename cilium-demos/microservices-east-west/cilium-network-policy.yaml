@@ -1,0 +1,141 @@
+# Cilium L7 east-west policies for the Pac-Man microservices demo.
+#
+# Web -> score and web -> user traffic is allowed only on the internal
+# east-west paths exposed by the pacman app (and the legacy public proxy
+# paths it forwards from, kept for compatibility). External ingress to web
+# is restricted to the game's static assets and public game APIs.
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: pacman-east-west
+specs:
+  # Egress baseline: in-namespace traffic, kube-apiserver, and kube-dns.
+  # Ingress rules are scoped per role below so L7 filters are enforced.
+  - endpointSelector: {}
+    egress:
+      - toEndpoints:
+          - matchLabels: {}
+      - toEntities:
+          - kube-apiserver
+      - toEndpoints:
+          - matchLabels:
+              k8s:io.kubernetes.pod.namespace: kube-system
+        toPorts:
+          - ports:
+              - port: "53"
+                protocol: UDP
+  # External ingress to pacman-web: static assets, health, observability,
+  # and the public game APIs (which the web role forwards to /internal/*).
+  - endpointSelector:
+      matchLabels:
+        app.kubernetes.io/component: web
+    ingress:
+      - toPorts:
+          - ports:
+              - port: "8080"
+                protocol: TCP
+            rules:
+              http:
+                - method: GET
+                  path: "/"
+                - method: GET
+                  path: "/pacman-canvas.js"
+                - method: GET
+                  path: "/pacman-canvas.css"
+                - method: GET
+                  path: "/style.css"
+                - method: GET
+                  path: "/cache.manifest"
+                - method: GET
+                  path: "/data/map.json"
+                - method: GET
+                  path: "/js/.*"
+                - method: GET
+                  path: "/img/.*"
+                - method: GET
+                  path: "/fonts/.*"
+                - method: GET
+                  path: "/mp3/.*"
+                - method: GET
+                  path: "/wav/.*"
+                - method: GET
+                  path: "/healthz"
+                - method: GET
+                  path: "/readyz"
+                - method: GET
+                  path: "/version"
+                - method: GET
+                  path: "/config"
+                - method: POST
+                  path: "/config"
+                - method: GET
+                  path: "/highscores/list"
+                - method: POST
+                  path: "/highscores"
+                - method: GET
+                  path: "/user/id"
+                - method: GET
+                  path: "/user/stats"
+                - method: POST
+                  path: "/user/stats"
+                - method: GET
+                  path: "/metrics"
+  # Web -> score: legacy public paths plus the new /internal/* east-west
+  # paths the web role forwards to when SCORE_SERVICE_URL is configured.
+  - endpointSelector:
+      matchLabels:
+        app.kubernetes.io/component: score
+    ingress:
+      - fromEndpoints:
+          - matchLabels:
+              app.kubernetes.io/component: web
+        toPorts:
+          - ports:
+              - port: "8080"
+                protocol: TCP
+            rules:
+              http:
+                - method: GET
+                  path: /healthz
+                - method: GET
+                  path: /readyz
+                - method: GET
+                  path: /highscores/list
+                - method: POST
+                  path: /highscores
+                - method: GET
+                  path: /internal/score/read
+                - method: POST
+                  path: /internal/score/write
+  # Web -> user: legacy public paths plus the new /internal/* east-west
+  # paths the web role forwards to when USER_SERVICE_URL is configured.
+  - endpointSelector:
+      matchLabels:
+        app.kubernetes.io/component: user
+    ingress:
+      - fromEndpoints:
+          - matchLabels:
+              app.kubernetes.io/component: web
+        toPorts:
+          - ports:
+              - port: "8080"
+                protocol: TCP
+            rules:
+              http:
+                - method: GET
+                  path: /healthz
+                - method: GET
+                  path: /readyz
+                - method: GET
+                  path: /user/id
+                - method: GET
+                  path: /user/stats
+                - method: POST
+                  path: /user/stats
+                - method: GET
+                  path: /internal/user/session
+                - method: GET
+                  path: /internal/user/stats
+                - method: POST
+                  path: /internal/user/stats

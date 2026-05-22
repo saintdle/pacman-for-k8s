@@ -1,0 +1,22 @@
+# Base Kustomization for the classic Mongo-backed deployment.
+# RBAC is intentionally excluded here: pacman-install.sh renders it via
+# envsubst so the ClusterRoleBinding subject namespace matches $NAMESPACE.
+#
+# Usage:
+#   kubectl apply -k . -n pacman-demo
+#   (then apply security/rbac.yaml separately with $NAMESPACE substituted)
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: pacman-demo
+
+commonLabels:
+  app.kubernetes.io/part-of: pacman
+
+resources:
+  - security/secret.yaml
+  - persistentvolumeclaim/mongo-pvc.yaml
+  - deployments/mongo-deployment.yaml
+  - services/mongo-service.yaml
+  - deployments/pacman-deployment.yaml
+  - services/pacman-service.yaml

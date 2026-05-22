@@ -1,0 +1,220 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pacman-web
+  labels:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: pacman-cilium-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pacman
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pacman
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: pacman-cilium-demo
+    spec:
+      serviceAccountName: pacman-demo
+      containers:
+        - name: pacman
+          image: docker.io/saintdle/pacman@sha256:d1c36678cd8cb7c4a0ea7c80f8161ec39c899da20c4328d0dc4ff21ada762198
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_ROLE
+              value: web
+            - name: APP_VERSION
+              value: v1
+            - name: APP_VARIANT
+              value: stable
+            - name: SCORE_SERVICE_URL
+              value: http://pacman-score:8080
+            - name: USER_SERVICE_URL
+              value: http://pacman-user:8080
+            - name: DB_TYPE
+              value: memory
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pacman-score
+  labels:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: score
+    app.kubernetes.io/part-of: pacman-cilium-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pacman
+      app.kubernetes.io/component: score
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pacman
+        app.kubernetes.io/component: score
+        app.kubernetes.io/part-of: pacman-cilium-demo
+    spec:
+      containers:
+        - name: pacman
+          image: docker.io/saintdle/pacman@sha256:d1c36678cd8cb7c4a0ea7c80f8161ec39c899da20c4328d0dc4ff21ada762198
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_ROLE
+              value: score
+            - name: APP_VERSION
+              value: v1
+            - name: APP_VARIANT
+              value: score-service
+            - name: DB_TYPE
+              value: memory
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pacman-user
+  labels:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: pacman-cilium-demo
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pacman
+      app.kubernetes.io/component: user
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pacman
+        app.kubernetes.io/component: user
+        app.kubernetes.io/part-of: pacman-cilium-demo
+    spec:
+      containers:
+        - name: pacman
+          image: docker.io/saintdle/pacman@sha256:d1c36678cd8cb7c4a0ea7c80f8161ec39c899da20c4328d0dc4ff21ada762198
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_ROLE
+              value: user
+            - name: APP_VERSION
+              value: v1
+            - name: APP_VARIANT
+              value: user-service
+            - name: DB_TYPE
+              value: memory
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: pacman-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pacman-location-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: pacman-location-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: pacman-location-reader
+subjects:
+  - kind: ServiceAccount
+    name: pacman-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: pacman-demo-node-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: pacman-demo-node-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: pacman-demo-node-reader
+subjects:
+  - kind: ServiceAccount
+    name: pacman-demo
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pacman-web
+  labels:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: web
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pacman-score
+  labels:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: score
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: score
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pacman-user
+  labels:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: user
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: user
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,11 +1,14 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
+  name: pacman
   labels:
     name: pacman
-  name: pacman
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: pacman
   annotations:
-    source: "https://github.com/saintdle/pacman-tanzu"
+    source: "https://github.com/saintdle/pacman-for-k8s"
 spec:
   replicas: 1
   selector:
@@ -15,45 +18,74 @@ spec:
     metadata:
       labels:
         name: pacman
+        app.kubernetes.io/name: pacman
+        app.kubernetes.io/component: web
+        app.kubernetes.io/part-of: pacman
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
       containers:
-      - image: quay.io/ifont/pacman-nodejs-app:latest
-        name: pacman
-        ports:
-        - containerPort: 8080
-          name: http-server
-          protocol: TCP
-        livenessProbe:
-          httpGet:
-            path: /
-            port: 8080
-        readinessProbe:
-          httpGet:
-            path: /
-            port: 8080
-        env:
-        - name: MONGO_SERVICE_HOST
-          value: mongo
-        - name: MONGO_AUTH_USER
-          valueFrom:
-            secretKeyRef:
-              key: database-user
-              name: mongodb-users-secret
-        - name: MONGO_AUTH_PWD
-          valueFrom:
-            secretKeyRef:
-              key: database-password
-              name: mongodb-users-secret
-        - name: MONGO_DATABASE
-          value: pacman
-        - name: MY_MONGO_PORT
-          value: "27017"
-        - name: MONGO_USE_SSL
-          value: "false"
-        - name: MONGO_VALIDATE_SSL
-          value: "false"
-        - name: MY_NODE_NAME
-          valueFrom:
-            fieldRef:
-              apiVersion: v1
-              fieldPath: spec.nodeName
+        - name: pacman
+          image: docker.io/saintdle/pacman@sha256:d1c36678cd8cb7c4a0ea7c80f8161ec39c899da20c4328d0dc4ff21ada762198
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8080
+              name: http-server
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http-server
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http-server
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          env:
+            - name: DB_TYPE
+              value: mongo
+            - name: MONGO_SERVICE_HOST
+              value: mongo
+            - name: MONGO_AUTH_USER
+              valueFrom:
+                secretKeyRef:
+                  key: database-user
+                  name: mongodb-users-secret
+            - name: MONGO_AUTH_PWD
+              valueFrom:
+                secretKeyRef:
+                  key: database-password
+                  name: mongodb-users-secret
+            - name: MONGO_DATABASE
+              value: pacman
+            - name: MY_MONGO_PORT
+              value: "27017"
+            - name: MONGO_USE_SSL
+              value: "false"
+            - name: MONGO_VALIDATE_SSL
+              value: "false"
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName

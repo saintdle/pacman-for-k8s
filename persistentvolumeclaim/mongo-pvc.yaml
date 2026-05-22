@@ -1,8 +1,11 @@
-kind: PersistentVolumeClaim
 apiVersion: v1
+kind: PersistentVolumeClaim
 metadata:
   name: mongo-storage
-  namespace: pacman
+  labels:
+    app.kubernetes.io/name: mongo
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: pacman
 spec:
   accessModes:
     - ReadWriteOnce

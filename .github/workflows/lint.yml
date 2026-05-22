@@ -1,0 +1,57 @@
+name: lint
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  yamllint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yamllint
+        run: pip install yamllint
+      - name: Run yamllint
+        run: yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: disable, comments: disable, indentation: disable}}" .
+
+  kubeconform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+            | tar -xz kubeconform
+          sudo mv kubeconform /usr/local/bin/kubeconform
+
+      - name: Validate core manifests against Kubernetes 1.30
+        run: |
+          # Render RBAC template before validating.
+          export NAMESPACE=pacman-demo
+          envsubst < security/rbac.yaml > /tmp/rendered-rbac.yaml
+          # Exclude RBAC source (templated) and cilium-demos (requires CRD schemas).
+          git ls-files '*.yaml' '*.yml' \
+            | grep -v '^security/rbac.yaml$' \
+            | grep -v '^cilium-demos/' \
+            | grep -v '^\.github/' \
+            | grep -v '^kustomization.yaml$' \
+            | xargs kubeconform \
+                -kubernetes-version 1.30.0 \
+                -strict \
+                -summary \
+                -ignore-missing-schemas \
+                /tmp/rendered-rbac.yaml
+
+      - name: Validate Cilium CRDs (advisory)
+        continue-on-error: true
+        run: |
+          SCHEMA_LOCATIONS="default https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+          git ls-files 'cilium-demos/**/*.yaml' 2>/dev/null \
+            | xargs --no-run-if-empty kubeconform \
+                -kubernetes-version 1.30.0 \
+                -summary \
+                -ignore-missing-schemas \
+                -schema-location "$SCHEMA_LOCATIONS"

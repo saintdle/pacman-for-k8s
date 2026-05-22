@@ -4,11 +4,15 @@ metadata:
   name: pacman
   labels:
     name: pacman
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: web
+    app.kubernetes.io/part-of: pacman
 spec:
   type: LoadBalancer
   ports:
     - port: 80
       targetPort: 8080
       protocol: TCP
+      name: http
   selector:
     name: pacman
