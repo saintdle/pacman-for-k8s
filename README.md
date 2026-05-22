@@ -58,16 +58,55 @@ high score is still there.
 ## Helm
 
 A Helm chart is published from
-[`saintdle/helm-charts`](https://github.com/saintdle/helm-charts):
+[`saintdle/helm-charts`](https://github.com/saintdle/helm-charts) and
+served via GitHub Pages at
+[`saintdle.github.io/helm-charts`](https://saintdle.github.io/helm-charts/).
+The chart packages the same modernized Pac-Man image used by the manifests
+in this repo (pinned by digest, Pod Security Standards `restricted`),
+and supports both the MongoDB and PostgreSQL backends.
 
 ```bash
 helm repo add veducate https://saintdle.github.io/helm-charts/
-helm install pacman veducate/pacman -n pacman-demo --create-namespace
+helm repo update veducate
+
+# MongoDB backend (default)
+helm install pacman veducate/pacman \
+  -n pacman-demo --create-namespace
+
+# PostgreSQL backend (runs a schema migration Job)
+helm install pacman veducate/pacman \
+  -n pacman-demo --create-namespace \
+  --set database=postgres
+
+# Inspect all available values
 helm show values veducate/pacman
 ```
 
-See [this blog post](https://veducate.co.uk/how-to-create-helm-chart/) for
-how the chart was authored.
+Common overrides:
+
+```bash
+# Expose via NodePort instead of LoadBalancer
+helm install pacman veducate/pacman -n pacman-demo --create-namespace \
+  --set service.type=NodePort
+
+# Bring your own database secret
+helm install pacman veducate/pacman -n pacman-demo --create-namespace \
+  --set mongo.existingSecret=my-mongo-secret
+
+# Enable Ingress
+helm install pacman veducate/pacman -n pacman-demo --create-namespace \
+  --set ingress.enabled=true \
+  --set ingress.hosts[0].host=pacman.example.com \
+  --set ingress.hosts[0].paths[0].path=/ \
+  --set ingress.hosts[0].paths[0].pathType=Prefix
+```
+
+To uninstall:
+
+```bash
+helm uninstall pacman -n pacman-demo
+kubectl -n pacman-demo delete pvc --all   # PVCs are retained by default
+```
 
 ## Cilium demo suite
 
