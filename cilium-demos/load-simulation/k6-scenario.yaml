@@ -1,0 +1,150 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pacman-k6-scenario
+  labels:
+    app.kubernetes.io/name: pacman-k6
+    app.kubernetes.io/component: load-generator
+data:
+  pacman-user-flow.js: |
+    import http from 'k6/http';
+    import { check, sleep } from 'k6';
+
+    const baseUrl = __ENV.PACMAN_BASE_URL || 'http://pacman-web:8080';
+    const scoreSubmitRate = Number(__ENV.SCORE_SUBMIT_RATE || '0.08');
+    const highScoreReadRate = Number(__ENV.HIGH_SCORE_READ_RATE || '0.35');
+
+    export const options = {
+      scenarios: {
+        pacman_users: {
+          executor: 'ramping-vus',
+          stages: [
+            { duration: __ENV.RAMP_UP || '1m', target: Number(__ENV.USERS || '50') },
+            { duration: __ENV.HOLD || '5m', target: Number(__ENV.USERS || '50') },
+            { duration: __ENV.RAMP_DOWN || '1m', target: 0 },
+          ],
+          gracefulRampDown: '30s',
+        },
+      },
+      thresholds: {
+        http_req_failed: ['rate<0.05'],
+        http_req_duration: ['p(95)<1000'],
+      },
+    };
+
+    function form(fields) {
+      return Object.entries(fields)
+        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(String(value))}`)
+        .join('&');
+    }
+
+    function headers(sessionId) {
+      return {
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded',
+          'user-agent': `k6-pacman-user/${sessionId}`,
+          'x-pacman-simulator-session': String(sessionId),
+        },
+      };
+    }
+
+    function randomIntBetween(min, max) {
+      return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    function randomItem(items) {
+      return items[randomIntBetween(0, items.length - 1)];
+    }
+
+    export default function () {
+      const sessionId = `${__VU}-${__ITER}`;
+      const browserHeaders = headers(sessionId);
+      const staticPaths = ['/', '/style.css', '/pacman-canvas.css', '/pacman-canvas.js', '/config', '/location/metadata'];
+
+      for (const path of staticPaths) {
+        const response = http.get(`${baseUrl}${path}`, browserHeaders);
+        check(response, { [`GET ${path} succeeded`]: (res) => res.status >= 200 && res.status < 400 });
+        sleep(randomIntBetween(1, 4) / 10);
+      }
+
+      const userResponse = http.get(`${baseUrl}/user/id`, browserHeaders);
+      check(userResponse, { 'user id created': (res) => res.status === 200 });
+      const userId = userResponse.json();
+
+      let score = randomIntBetween(100, 1200);
+      const level = randomIntBetween(1, 3);
+      const zone = randomItem(['sim-zone-1', 'sim-zone-2', 'sim-zone-3']);
+      const host = `k6-${__VU}`;
+
+      for (let step = 0; step < randomIntBetween(3, 10); step += 1) {
+        score += randomIntBetween(10, 180);
+        const statsResponse = http.post(
+          `${baseUrl}/user/stats`,
+          form({ userId, cloud: 'synthetic', zone, host, score, level, lives: 3, elapsedTime: step + 1 }),
+          browserHeaders,
+        );
+        check(statsResponse, { 'stats accepted': (res) => res.status === 200 });
+
+        if (Math.random() < highScoreReadRate) http.get(`${baseUrl}/highscores/list`, browserHeaders);
+        if (Math.random() < scoreSubmitRate) {
+          http.post(
+            `${baseUrl}/highscores`,
+            form({ name: `K6${__VU}`, cloud: 'synthetic', zone, host, score, level }),
+            browserHeaders,
+          );
+        }
+        sleep(randomIntBetween(1, 4));
+      }
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pacman-k6-load
+  labels:
+    app.kubernetes.io/name: pacman-k6
+    app.kubernetes.io/component: load-generator
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pacman-k6
+        app.kubernetes.io/component: load-generator
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: k6
+          image: grafana/k6:0.51.0
+          args:
+            - run
+            - /scripts/pacman-user-flow.js
+          env:
+            - name: PACMAN_BASE_URL
+              value: http://pacman-web:8080
+            - name: USERS
+              value: "50"
+            - name: RAMP_UP
+              value: 1m
+            - name: HOLD
+              value: 5m
+            - name: RAMP_DOWN
+              value: 1m
+            - name: SCORE_SUBMIT_RATE
+              value: "0.08"
+            - name: HIGH_SCORE_READ_RATE
+              value: "0.35"
+          volumeMounts:
+            - name: scenario
+              mountPath: /scripts
+          resources:
+            requests:
+              cpu: 250m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+      volumes:
+        - name: scenario
+          configMap:
+            name: pacman-k6-scenario

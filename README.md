@@ -1,63 +1,114 @@
 # Running Pac-Man on Kubernetes
 
-Pac-Man the classic arcade game - deployment files for VMware Tanzu Kubernetes and all other Kubernetes distributions.
+Extended deployment surface for the Pac-Man app maintained at
+[`saintdle/pacman`](https://github.com/saintdle/pacman). For a minimal,
+in-repo set of learning examples (a multi-role `Deployment`, a postgres
+example with a migration `Job`, Cilium L7 example, Prometheus and Tetragon
+overlays) see
+[`saintdle/pacman/k8s/examples`](https://github.com/saintdle/pacman/tree/master/k8s/examples).
 
-<img src="https://veducate.co.uk/wp-content/uploads/2021/09/Pac-Man-UI.jpg" width=45% height=45%>
+This repo layers on persistent storage, Pod Security Standards, install
+scripts, and a catalogue of Cilium demos.
 
-## Pre-Reqs
+<img src="https://veducate.co.uk/wp-content/uploads/2021/09/Pac-Man-UI.jpg" width="45%" height="45%">
 
-ServiceType: LoadBalancer must be available for external connectivity to the Pac-Man front-end, otherwise you'll need to make some changes to the files in the "services" folder.
+## Pre-requisites
 
-## Deployment
+- A Kubernetes cluster (any distribution). `ServiceType: LoadBalancer` is
+  recommended for external connectivity to the front-end. Without it, edit
+  `services/pacman-service.yaml` to use `NodePort` or `ClusterIP` and use
+  `kubectl port-forward`.
+- Pod Security Standards labels are applied to the install namespace by
+  `pacman-install.sh` (`enforce=baseline`, `audit/warn=restricted`). All
+  base manifests are written to comply with the `restricted` profile
+  (`runAsNonRoot`, dropped capabilities, `seccompProfile: RuntimeDefault`,
+  `allowPrivilegeEscalation: false`).
+- `bash`, `kubectl`, and `envsubst` on the local machine.
 
-### Using Helm to install
-````
-kubectl create namespace pacman
+## Image
 
+All manifests in this repo target `docker.io/saintdle/pacman`, pinned by
+digest (`sha256:d1c36678...`). The Cilium demos accept a `PACMAN_IMAGE`
+env var override.
+
+## Install (base mongo-backed deployment)
+
+```bash
+./pacman-install.sh                  # defaults to namespace pacman-demo
+NAMESPACE=my-ns ./pacman-install.sh  # custom namespace
+```
+
+The install is idempotent (uses `kubectl apply`). Re-running it picks up
+manifest changes without errors. RBAC is rendered against the chosen
+`$NAMESPACE` so the ClusterRoleBinding subject matches the namespace you
+installed into.
+
+## Uninstall
+
+```bash
+./pacman-uninstall.sh                 # removes everything including the PVC
+./pacman-uninstall.sh keeppvc         # keep the namespace and the PVC
+NAMESPACE=my-ns ./pacman-uninstall.sh
+```
+
+Use `keeppvc` to demonstrate Mongo persistence: install, play a game,
+record a high score, uninstall with `keeppvc`, install again, and the
+high score is still there.
+
+## Helm
+
+A Helm chart is published from
+[`saintdle/helm-charts`](https://github.com/saintdle/helm-charts):
+
+```bash
 helm repo add veducate https://saintdle.github.io/helm-charts/
-helm install pacman veducate/pacman -n pacman
-
-# You can see the available values by running
+helm install pacman veducate/pacman -n pacman-demo --create-namespace
 helm show values veducate/pacman
-````
-[Read this blog post](https://veducate.co.uk/how-to-create-helm-chart/) to learn how this Helm Chart was created.
+```
 
-### Using a Script for installation
-Clone repo and run ```chmod +X pacman-install.sh``` and then run file ```./pacman-install.sh```
+See [this blog post](https://veducate.co.uk/how-to-create-helm-chart/) for
+how the chart was authored.
 
-or the following steps:
+## Cilium demo suite
 
-    kubectl create namespace pacman
-    kubectl create -n pacman -f pacman-tanzu/
+The [`cilium-demos`](cilium-demos) directory contains kind-based demos for
+Cilium OSS, Hubble, Gateway API, Cluster Mesh, and Tetragon. The default
+namespace is `pacman-demo`.
 
-#### Uninstall using a Script
-Run file `./pacman-uninstall.sh`. This will delete all objects created by `./pacman-install.sh`
+```bash
+./cilium-demos/scripts/setup-single-kind.sh
+./cilium-demos/scripts/deploy-demo.sh microservices-east-west
+./cilium-demos/scripts/deploy-demo.sh load-simulation
+```
 
-Alternatively, run `./pacman-uninstall.sh keeppvc`. This will delete all objects except for the pacman namespace and the persistent volume claim. You can use this to demonstrate persistence of the MongoDB data by installing, playing a game and recording a high score, then unininstalling with the `keeppvc` argument. You can then run the installation again and the high score will persist.
+See [`cilium-demos/README.md`](cilium-demos/README.md) for the full
+catalogue and per-demo walk-throughs.
 
 ## Architecture
 
-The application is made up of the following components:
+```
+Namespace (pacman-demo)
+├── Secret               mongodb-users-secret
+├── ConfigMap            mongo-init   (mongo entrypoint user seed)
+├── PVC                  mongo-storage
+├── Deployment           mongo        (mongo:8, RWO PVC, Recreate strategy)
+├── Service              mongo        (ClusterIP, 27017)
+├── Deployment           pacman       (saintdle/pacman, /healthz, /readyz)
+└── Service              pacman       (LoadBalancer, 80 → 8080)
+```
 
-* Namespace
-* Deployment
-  * MongoDB Pod
-    * DB Authentication configured
-    * Attached to a PVC
-  * Pac-Man Pod
-    * Nodejs web front end that connects back to the MongoDB Pod by looking for the Pod DNS address internally.
-* RBAC Configuration for Pod Security and Service Account
-* Secret which holds the data for the MongoDB Usernames and Passwords to be configured
-* Service
-  * Type: LoadBalancer
-    * Used to balance traffic to the Pac-Man Pods
+ClusterRole / ClusterRoleBinding (cluster-scoped) grant `get/watch/list`
+on `pods` and `nodes` to the `default` ServiceAccount of the install
+namespace, used by the in-app location probe.
 
-<img src="https://i1.wp.com/veducate.co.uk/wp-content/uploads/2021/08/Pac-Man-Kubernetes-Diagram.jpg?w=483&ssl=1" width=50% height=50%>
+## Repository layout
 
-## Source
-
-These are modified files from the below github repo for the node.js version, which contain the necessary changes to run in VMware Tanzu Kubernetes Grid (TKG) such as updated api values and pod security policies (psp) with associated service accounts and RBAC.
-
-> <https://github.com/font/k8s-example-apps/tree/master/pacman-nodejs-app>
-
-Security changes to the deployment such as setting up mongodb auth were thanks to [Dav1x](https://github.com/dav1x/) you can find his [Pac-Man deployment for OpenShift here](https://github.com/dav1x/pacman-ocp).
+```
+deployments/             Mongo and Pac-Man Deployments
+services/                Mongo (ClusterIP) and Pac-Man (LoadBalancer) Services
+persistentvolumeclaim/   Mongo data PVC
+security/                RBAC (rendered at install time) and Secret
+cilium-demos/            kind-based Cilium / Hubble / Tetragon demos
+pacman-install.sh        Idempotent installer (NAMESPACE override supported)
+pacman-uninstall.sh      Uninstaller with optional `keeppvc`
+```

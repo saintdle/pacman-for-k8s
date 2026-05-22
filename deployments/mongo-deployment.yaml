@@ -1,13 +1,42 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mongo-init
+  labels:
+    app.kubernetes.io/name: mongo
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: pacman
+data:
+  init-user.sh: |
+    #!/bin/bash
+    set -e
+    mongosh "mongodb://${MONGO_INITDB_ROOT_USERNAME}:${MONGO_INITDB_ROOT_PASSWORD}@127.0.0.1:27017/admin?authSource=admin" <<EOF
+    use ${APP_DB_NAME};
+    if (!db.getUser("${APP_DB_USER}")) {
+      db.createUser({
+        user: "${APP_DB_USER}",
+        pwd: "${APP_DB_PWD}",
+        roles: [ { role: "readWrite", db: "${APP_DB_NAME}" } ]
+      });
+    }
+    EOF
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   labels:
     name: mongo
+    app.kubernetes.io/name: mongo
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: pacman
   name: mongo
   annotations:
-    source: "https://github.com/saintdle/pacman-tanzu"
+    source: "https://github.com/saintdle/pacman-for-k8s"
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       name: mongo
@@ -15,71 +44,92 @@ spec:
     metadata:
       labels:
         name: mongo
+        app.kubernetes.io/name: mongo
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: pacman
     spec:
-      initContainers:
-      - args:
-        - |
-          mkdir -p /bitnami/mongodb
-          chown -R "1001:1001" "/bitnami/mongodb"
-        command:
-        - /bin/bash
-        - -ec
-        image: docker.io/bitnami/bitnami-shell:10-debian-10-r158
-        imagePullPolicy: Always
-        name: volume-permissions
-        resources: {}
-        securityContext:
-          runAsUser: 0
-        terminationMessagePath: /dev/termination-log
-        terminationMessagePolicy: File
-        volumeMounts:
-        - mountPath: /bitnami/mongodb
-          name: mongo-db
       restartPolicy: Always
-      schedulerName: default-scheduler
       securityContext:
-        fsGroup: 1001
+        fsGroup: 999
+        runAsUser: 999
+        runAsGroup: 999
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
       serviceAccountName: default
       terminationGracePeriodSeconds: 30
       volumes:
-      - name: mongo-db
-        persistentVolumeClaim:
-          claimName: mongo-storage
+        - name: mongo-db
+          persistentVolumeClaim:
+            claimName: mongo-storage
+        - name: mongo-init
+          configMap:
+            name: mongo-init
+            defaultMode: 0755
       containers:
-      - image: bitnami/mongodb:4.4.8
-        name: mongo
-        env:
-        - name: MONGODB_ROOT_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              key: database-admin-password
-              name: mongodb-users-secret
-        - name: MONGODB_DATABASE
-          valueFrom:
-            secretKeyRef:
-              key: database-name
-              name: mongodb-users-secret
-        - name: MONGODB_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              key: database-password
-              name: mongodb-users-secret
-        - name: MONGODB_USERNAME
-          valueFrom:
-            secretKeyRef:
-              key: database-user
-              name: mongodb-users-secret
-        readinessProbe:
-          exec:
-           command:
-            - /bin/sh
-            - -i
-            - -c
-            - mongo 127.0.0.1:27017/$MONGODB_DATABASE -u $MONGODB_USERNAME -p $MONGODB_PASSWORD
-              --eval="quit()"
-        ports:
-        - name: mongo
-          containerPort: 27017
-        volumeMounts:
-          - name: mongo-db
-            mountPath: /bitnami/mongodb/
+        - image: mongo:8
+          name: mongo
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          args: ["--bind_ip_all"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          env:
+            - name: MONGO_INITDB_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  key: database-admin-name
+                  name: mongodb-users-secret
+            - name: MONGO_INITDB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: database-admin-password
+                  name: mongodb-users-secret
+            - name: APP_DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  key: database-name
+                  name: mongodb-users-secret
+            - name: APP_DB_USER
+              valueFrom:
+                secretKeyRef:
+                  key: database-user
+                  name: mongodb-users-secret
+            - name: APP_DB_PWD
+              valueFrom:
+                secretKeyRef:
+                  key: database-password
+                  name: mongodb-users-secret
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'mongosh --quiet --eval "db.adminCommand({ ping: 1 }).ok"'
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'mongosh --quiet --eval "db.adminCommand({ ping: 1 }).ok"'
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          ports:
+            - name: mongo
+              containerPort: 27017
+          volumeMounts:
+            - name: mongo-db
+              mountPath: /data/db
+            - name: mongo-init
+              mountPath: /docker-entrypoint-initdb.d

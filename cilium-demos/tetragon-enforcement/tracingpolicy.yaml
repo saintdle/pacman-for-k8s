@@ -1,0 +1,29 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: pacman-demo-process-and-file-observe
+spec:
+  kprobes:
+    - call: security_bprm_check
+      syscall: false
+      return: true
+      args:
+        - index: 0
+          type: linux_binprm
+      selectors:
+        - matchNamespaces:
+            - namespace: Pid
+              operator: In
+              values:
+                - host_ns
+          matchActions:
+            - action: Post
+    - call: security_file_open
+      syscall: false
+      return: true
+      args:
+        - index: 0
+          type: file
+      selectors:
+        - matchActions:
+            - action: Post

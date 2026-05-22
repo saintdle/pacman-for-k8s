@@ -1,16 +1,32 @@
-#!/bin/bash
+#!/usr/bin/env bash
+#
+# Pac-Man uninstaller. Usage:
+#   ./pacman-uninstall.sh            # remove namespace + PVC
+#   ./pacman-uninstall.sh keeppvc    # keep namespace and PVC (Mongo persistence demo)
+#
+# Honours $NAMESPACE (default: pacman-demo).
+set -euo pipefail
 
-kubectl delete -n pacman -f security/rbac.yaml
-kubectl delete -n pacman -f security/secret.yaml
-kubectl delete -n pacman -f deployments/mongo-deployment.yaml
-kubectl delete -n pacman -f deployments/pacman-deployment.yaml
-kubectl delete -n pacman -f services/mongo-service.yaml
-kubectl delete -n pacman -f services/pacman-service.yaml
+NAMESPACE="${NAMESPACE:-pacman-demo}"
+export NAMESPACE
+MODE="${1:-}"
 
-if [[ $# -gt 0  && "$1" == "keeppvc" ]]
-then
-    echo "Keeping namespace and persistent volume claim"
+command -v kubectl  >/dev/null || { echo "kubectl not found"  >&2; exit 1; }
+command -v envsubst >/dev/null || { echo "envsubst not found" >&2; exit 1; }
+
+# Cluster-scoped RBAC, always removed (subject is namespaced).
+envsubst < security/rbac.yaml | kubectl delete --ignore-not-found -f -
+
+if [[ "$MODE" == "keeppvc" ]]; then
+  echo "Removing workloads in '$NAMESPACE' (keeping PVC and namespace)..."
+  kubectl -n "$NAMESPACE" delete --ignore-not-found -f services/pacman-service.yaml
+  kubectl -n "$NAMESPACE" delete --ignore-not-found -f deployments/pacman-deployment.yaml
+  kubectl -n "$NAMESPACE" delete --ignore-not-found -f services/mongo-service.yaml
+  kubectl -n "$NAMESPACE" delete --ignore-not-found -f deployments/mongo-deployment.yaml
+  kubectl -n "$NAMESPACE" delete --ignore-not-found -f security/secret.yaml
+  echo "Done. Mongo PVC retained:"
+  kubectl -n "$NAMESPACE" get pvc
 else
-    kubectl delete -n pacman -f persistentvolumeclaim/mongo-pvc.yaml
-    kubectl delete namespace pacman
+  echo "Removing namespace '$NAMESPACE' (including PVC)..."
+  kubectl delete namespace "$NAMESPACE" --ignore-not-found
 fi
