@@ -22,14 +22,6 @@ kubectl label namespace "$NAMESPACE" \
 
 envsubst < security/rbac.yaml             | kubectl apply -f -
 kubectl apply -n "$NAMESPACE" -f security/secret.yaml
-kubectl apply -n "$NAMESPACE" -f persistentvolumeclaim/mongo-pvc.yaml
-kubectl apply -n "$NAMESPACE" -f deployments/mongo-deployment.yaml
-
-echo "Waiting for mongo pod to become ready..."
-kubectl wait -n "$NAMESPACE" --for=condition=Ready pod \
-  -l name=mongo --timeout=180s
-
-kubectl apply -n "$NAMESPACE" -f services/mongo-service.yaml
 kubectl apply -n "$NAMESPACE" -f deployments/pacman-deployment.yaml
 kubectl apply -n "$NAMESPACE" -f services/pacman-service.yaml
 

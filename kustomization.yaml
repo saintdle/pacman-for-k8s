@@ -15,8 +15,5 @@ commonLabels:
 
 resources:
   - security/secret.yaml
-  - persistentvolumeclaim/mongo-pvc.yaml
-  - deployments/mongo-deployment.yaml
-  - services/mongo-service.yaml
   - deployments/pacman-deployment.yaml
   - services/pacman-service.yaml

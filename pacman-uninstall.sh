@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #
 # Pac-Man uninstaller. Usage:
-#   ./pacman-uninstall.sh            # remove namespace + PVC
-#   ./pacman-uninstall.sh keeppvc    # keep namespace and PVC (Mongo persistence demo)
+#   ./pacman-uninstall.sh            # remove namespace 
 #
 # Honours $NAMESPACE (default: pacman-demo).
 set -euo pipefail
@@ -18,15 +17,8 @@ command -v envsubst >/dev/null || { echo "envsubst not found" >&2; exit 1; }
 envsubst < security/rbac.yaml | kubectl delete --ignore-not-found -f -
 
 if [[ "$MODE" == "keeppvc" ]]; then
-  echo "Removing workloads in '$NAMESPACE' (keeping PVC and namespace)..."
+  echo "Removing workloads in '$NAMESPACE'..."
   kubectl -n "$NAMESPACE" delete --ignore-not-found -f services/pacman-service.yaml
   kubectl -n "$NAMESPACE" delete --ignore-not-found -f deployments/pacman-deployment.yaml
-  kubectl -n "$NAMESPACE" delete --ignore-not-found -f services/mongo-service.yaml
-  kubectl -n "$NAMESPACE" delete --ignore-not-found -f deployments/mongo-deployment.yaml
   kubectl -n "$NAMESPACE" delete --ignore-not-found -f security/secret.yaml
-  echo "Done. Mongo PVC retained:"
-  kubectl -n "$NAMESPACE" get pvc
-else
-  echo "Removing namespace '$NAMESPACE' (including PVC)..."
-  kubectl delete namespace "$NAMESPACE" --ignore-not-found
 fi
