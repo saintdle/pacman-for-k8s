@@ -31,7 +31,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: pacman
-          image: docker.io/saintdle/pacman@sha256:d1c36678cd8cb7c4a0ea7c80f8161ec39c899da20c4328d0dc4ff21ada762198
+          image: docker.io/saintdle/pacman@sha256:cb9272461127465676fefd4778e67faea41ef65e03c19014626287d2c542dd05
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

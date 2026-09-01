@@ -28,7 +28,7 @@ scripts, and a catalogue of Cilium demos.
 ## Image
 
 All manifests in this repo target `docker.io/saintdle/pacman`, pinned by
-digest (`sha256:d1c36678...`). The Cilium demos accept a `PACMAN_IMAGE`
+digest (`sha256:cb927246...`). The Cilium demos accept a `PACMAN_IMAGE`
 env var override.
 
 ## Install (base mongo-backed deployment)
