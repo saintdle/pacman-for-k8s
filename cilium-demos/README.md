@@ -2,7 +2,7 @@
 
 These demos use the Pac-Man app as a small but real Kubernetes workload for showing Cilium OSS, Hubble, Gateway API, Cluster Mesh, and Tetragon.
 
-Default image: `docker.io/saintdle/pacman@sha256:4de4f422b5edb49b606055525c5dc29c3824446f401f6ece241d7ae6302d1fca`.
+Default image: `docker.io/saintdle/pacman@sha256:6d3ae3354bafaabc94caa79cc387e8bdc326ffeb2af8c496293a3a89b62b12c1`.
 Override it in scripts with `PACMAN_IMAGE=your-registry/your-image:tag`.
 
 ## Prerequisites
