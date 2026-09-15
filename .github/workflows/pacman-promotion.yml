@@ -1,0 +1,105 @@
+name: Promote Pac-Man image
+
+on:
+  repository_dispatch:
+    types: [pacman-chart-release]
+  workflow_dispatch:
+    inputs:
+      app_version:
+        description: Pac-Man application version
+        required: true
+        type: string
+      chart_version:
+        description: Published Pac-Man Helm chart version
+        required: true
+        type: string
+      image_digest:
+        description: Published multi-architecture image manifest digest
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: pacman-k8s-promotion
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: docker.io/saintdle/pacman
+
+jobs:
+  promotion:
+    name: Open Kubernetes promotion PR
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+
+      - name: Read promotion payload
+        id: input
+        env:
+          DISPATCH_APP_VERSION: ${{ github.event.client_payload.app_version || '' }}
+          DISPATCH_CHART_VERSION: ${{ github.event.client_payload.chart_version || '' }}
+          DISPATCH_IMAGE_DIGEST: ${{ github.event.client_payload.image_digest || '' }}
+          MANUAL_APP_VERSION: ${{ inputs.app_version || '' }}
+          MANUAL_CHART_VERSION: ${{ inputs.chart_version || '' }}
+          MANUAL_IMAGE_DIGEST: ${{ inputs.image_digest || '' }}
+        run: |
+          set -euo pipefail
+          app_version="${DISPATCH_APP_VERSION:-$MANUAL_APP_VERSION}"
+          chart_version="${DISPATCH_CHART_VERSION:-$MANUAL_CHART_VERSION}"
+          image_digest="${DISPATCH_IMAGE_DIGEST:-$MANUAL_IMAGE_DIGEST}"
+          [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$chart_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          {
+            echo "app_version=$app_version"
+            echo "chart_version=$chart_version"
+            echo "image_digest=$image_digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update pinned image digests
+        env:
+          IMAGE_DIGEST: ${{ steps.input.outputs.image_digest }}
+        run: |
+          set -euo pipefail
+          files=$(git grep -l -E "$IMAGE_REPOSITORY@sha256:[0-9a-f]{64}" || true)
+          if [[ -z "$files" ]]; then
+            echo "No pinned Pac-Man image references found."
+            exit 0
+          fi
+          while IFS= read -r file; do
+            perl -0pi -e 's#(docker\.io/saintdle/pacman@)sha256:[0-9a-f]{64}#${1}$ENV{IMAGE_DIGEST}#g' "$file"
+          done <<< "$files"
+
+          for file in README.md cilium-demos/README.md; do
+            if [[ -f "$file" ]]; then
+              perl -0pi -e 's#sha256:[0-9a-f]+\.\.\.#$ENV{IMAGE_DIGEST}#g' "$file"
+            fi
+          done
+          git diff --check
+
+      - name: Validate changed manifests
+        run: |
+          set -euo pipefail
+          pip install yamllint
+          yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: disable, comments: disable, indentation: disable}}" .
+
+      - name: Open or update Kubernetes promotion PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
+          branch: automation/pacman-${{ steps.input.outputs.app_version }}
+          delete-branch: false
+          commit-message: "chore(pacman): promote image ${{ steps.input.outputs.app_version }}"
+          title: "chore(pacman): promote ${{ steps.input.outputs.app_version }}"
+          body: |
+            Automated Pac-Man promotion.
+
+            - Application version: `${{ steps.input.outputs.app_version }}`
+            - Helm chart version: `${{ steps.input.outputs.chart_version }}`
+            - Image digest: `${{ steps.input.outputs.image_digest }}`
+
+            All Kubernetes image references remain digest-pinned.
