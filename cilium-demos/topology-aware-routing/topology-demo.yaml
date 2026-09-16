@@ -30,7 +30,7 @@ spec:
               app.kubernetes.io/component: web
       containers:
         - name: pacman
-          image: docker.io/saintdle/pacman@sha256:6d3ae3354bafaabc94caa79cc387e8bdc326ffeb2af8c496293a3a89b62b12c1
+          image: docker.io/saintdle/pacman@sha256:b3589f460b45899114ff7d9a104f7c1d0c76bd1f559d5dc4f688fa642a5c148e
           ports:
             - name: http
               containerPort: 8080
