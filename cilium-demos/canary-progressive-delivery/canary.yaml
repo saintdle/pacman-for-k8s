@@ -23,7 +23,7 @@ spec:
     spec:
       containers:
         - name: pacman
-          image: docker.io/saintdle/pacman@sha256:6d3ae3354bafaabc94caa79cc387e8bdc326ffeb2af8c496293a3a89b62b12c1
+          image: docker.io/saintdle/pacman@sha256:65ad14f925133fe4a1f22f287c70cdb4d5b215b66c3d33efc300cd1542466533
           ports:
             - name: http
               containerPort: 8080
@@ -62,7 +62,7 @@ spec:
     spec:
       containers:
         - name: pacman
-          image: docker.io/saintdle/pacman@sha256:6d3ae3354bafaabc94caa79cc387e8bdc326ffeb2af8c496293a3a89b62b12c1
+          image: docker.io/saintdle/pacman@sha256:65ad14f925133fe4a1f22f287c70cdb4d5b215b66c3d33efc300cd1542466533
           ports:
             - name: http
               containerPort: 8080
