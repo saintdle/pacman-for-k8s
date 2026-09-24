@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: simulator
-          image: docker.io/saintdle/pacman@sha256:65ad14f925133fe4a1f22f287c70cdb4d5b215b66c3d33efc300cd1542466533
+          image: docker.io/saintdle/pacman@sha256:b3589f460b45899114ff7d9a104f7c1d0c76bd1f559d5dc4f688fa642a5c148e
           imagePullPolicy: IfNotPresent
           command:
             - node
