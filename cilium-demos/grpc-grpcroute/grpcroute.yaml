@@ -21,7 +21,7 @@ spec:
     spec:
       containers:
         - name: pacman
-          image: docker.io/saintdle/pacman@sha256:46c641de22f09f88c4f10a7860bcc8ae8022309f3dc6cb0c32c77e7383a40ee7
+          image: docker.io/saintdle/pacman@sha256:599587789e3d8192dd2b283683ca692d154318c7d6690f7ba3dd26a5f2142987
           ports:
             - name: grpc
               containerPort: 9090
