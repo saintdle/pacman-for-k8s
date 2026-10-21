@@ -3,7 +3,7 @@ set -euo pipefail
 
 DEMO="${1:?usage: deploy-demo.sh <demo-directory>}"
 NAMESPACE="${NAMESPACE:-pacman-demo}"
-PACMAN_IMAGE="${PACMAN_IMAGE:-docker.io/saintdle/pacman@sha256:e283e9d05b3d6f0b0e9f141f8ae0511491f89b03809cee10aa1fa2def38c2f4b}"
+PACMAN_IMAGE="${PACMAN_IMAGE:-docker.io/saintdle/pacman@sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 RENDER_DIR="$(mktemp -d "$ROOT/.deploy-render.XXXXXX")"
 trap 'rm -rf "$RENDER_DIR"' EXIT
