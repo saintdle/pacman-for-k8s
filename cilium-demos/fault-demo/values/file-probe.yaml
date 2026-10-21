@@ -1,0 +1,15 @@
+demo:
+  fileProbeEnabled: true
+tetragon:
+  enabled: true
+  fileProbeMode: observe
+simulator:
+  # The chart requires a matching schedule; zero replicas keep probes manual.
+  replicas: 0
+  securityProbes:
+    enabled: true
+    durationSeconds: 60
+    operations:
+      - operation: fileProbe
+        ratePerSecond: 0.1
+        maxCount: 1
