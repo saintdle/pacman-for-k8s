@@ -57,9 +57,9 @@ export CHART_VERSION=0.7.17
 
 git clone https://github.com/saintdle/pacman.git "$LAB_DIR/app"
 git -C "$LAB_DIR/app" checkout --detach "$APP_REVISION"
-helm repo add pacman https://saintdle.github.io/helm-charts
-helm repo update
-helm pull pacman/pacman --version "$CHART_VERSION" --untar --untardir "$LAB_DIR"
+helm repo add pacman-charts https://saintdle.github.io/helm-charts
+helm repo update pacman-charts
+helm pull pacman-charts/pacman --version "$CHART_VERSION" --untar --untardir "$LAB_DIR"
 export CHART="$LAB_DIR/pacman"
 
 docker build -f "$LAB_DIR/app/docker/Dockerfile" \
