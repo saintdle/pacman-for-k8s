@@ -23,11 +23,11 @@ Install Git, Docker, kind, kubectl, Helm, the Cilium and Hubble CLIs, curl, and
 OpenSSL. Run commands from the root of this repository, in Bash.
 
 These examples need the fault controls from
-[saintdle/pacman#20](https://github.com/saintdle/pacman/pull/20) and
-[saintdle/helm-charts#27](https://github.com/saintdle/helm-charts/pull/27).
-The released image/chart defaults do not yet provide this combination. The
-commands below check out public source revisions and build a local image;
-they do not assume a pre-existing candidate image.
+[saintdle/pacman#20](https://github.com/saintdle/pacman/pull/20) and the
+published Pac-Man chart `0.7.17` from
+[saintdle/helm-charts](https://github.com/saintdle/helm-charts/releases/tag/pacman-0.7.17).
+The commands below build the app image from a reviewed public source revision
+and pull the released chart; they do not assume a pre-existing candidate image.
 
 The Tetragon enforcement scenarios also need a supported native Linux kernel
 with BTF and `CONFIG_BPF_KPROBE_OVERRIDE=y`. kind uses the container host's
@@ -52,14 +52,15 @@ export DEMO_DIR="$PWD/cilium-demos/fault-demo"
 LAB_DIR="$(mktemp -d)"
 export LAB_DIR
 export APP_REVISION=991ba38517da6339e66b0c6b1b088b17d59fdfd0
-export CHART_REVISION=2737a6b41145877169696038c4ad86567d158cb0
 export APP_IMAGE=pacman-manual-demo:991ba385
+export CHART_VERSION=0.7.17
 
 git clone https://github.com/saintdle/pacman.git "$LAB_DIR/app"
 git -C "$LAB_DIR/app" checkout --detach "$APP_REVISION"
-git clone https://github.com/saintdle/helm-charts.git "$LAB_DIR/helm-charts"
-git -C "$LAB_DIR/helm-charts" checkout --detach "$CHART_REVISION"
-export CHART="$LAB_DIR/helm-charts/charts/pacman"
+helm repo add pacman https://saintdle.github.io/helm-charts
+helm repo update
+helm pull pacman/pacman --version "$CHART_VERSION" --untar --untardir "$LAB_DIR"
+export CHART="$LAB_DIR/pacman"
 
 docker build -f "$LAB_DIR/app/docker/Dockerfile" \
   --build-arg COMMIT_SHA="$APP_REVISION" -t "$APP_IMAGE" "$LAB_DIR/app"
@@ -484,5 +485,5 @@ kind delete cluster --name "$CLUSTER_NAME"
 unset DEMO_TOKEN HELM_KUBECONTEXT
 ```
 
-The source checkouts under `LAB_DIR` and the locally built image are left
-for inspection. No shared cluster or existing checkout needs changing.
+The app source checkout, pulled chart, and locally built image under `LAB_DIR`
+are left for inspection. No shared cluster or existing checkout needs changing.
