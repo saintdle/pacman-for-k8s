@@ -1,0 +1,14 @@
+simulator:
+  faults:
+    enabled: true
+    seed: 42
+    durationSeconds: 300
+    rules:
+      - operations: [scoreRead, scoreWrite]
+        targetRole: score
+        errorRate: 0
+        errorStatus: 503
+        delayRate: 0.8
+        delayMs:
+          min: 800
+          max: 1500

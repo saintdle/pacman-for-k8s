@@ -40,5 +40,7 @@ hubble observe --namespace pacman-demo --follow
 | `fault-injection-resilience` | Gated app faults for resilience and observability demos |
 | `tetragon-enforcement` | Tetragon tracing and optional enforcement for lab-only app probes |
 | `runtime-security-incident` | Safe incident story using app logs, Tetragon events, and Hubble flows |
+| [fault-demo](fault-demo/README.md) | Ten human-run Helm scenarios for faults, missing telemetry, and Tetragon observe/enforce |
 
 Each demo directory has its own README with commands and observation points.
+The Helm scenarios have their own app/chart prerequisites; the default image above does not include all of their features.

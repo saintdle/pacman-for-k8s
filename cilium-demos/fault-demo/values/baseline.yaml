@@ -1,0 +1,28 @@
+database: postgres
+image:
+  repository: pacman-manual-demo
+  tag: "991ba385"
+  digest: ""
+  pullPolicy: Never
+fullnameOverride: pacman-fault
+roles:
+  enabled: true
+service:
+  type: ClusterIP
+postgres:
+  persistence:
+    enabled: false
+demo:
+  enabled: true
+  existingTokenSecret: pacman-demo-token
+serviceMonitor:
+  enabled: true
+ciliumNetworkPolicy:
+  enabled: true
+  denyScoreWrites: false
+  monitoringNamespace: monitoring
+simulator:
+  enabled: true
+  users: 2
+  minThinkMs: 800
+  maxThinkMs: 1000
