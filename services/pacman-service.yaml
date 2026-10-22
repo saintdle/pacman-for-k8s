@@ -1,18 +1,66 @@
+# Pac-Man Services for the multi-role install.
+#
+# pacman-web:   external entry point (LoadBalancer; without a controller,
+#               use kubectl port-forward).
+# pacman-score: internal Service used by web for /highscores and /internal/score/*.
+# pacman-user:  internal Service used by web for /user/* and /internal/user/*.
+---
 apiVersion: v1
 kind: Service
 metadata:
-  name: pacman
+  name: pacman-web
   labels:
-    name: pacman
     app.kubernetes.io/name: pacman
     app.kubernetes.io/component: web
     app.kubernetes.io/part-of: pacman
 spec:
   type: LoadBalancer
   ports:
-    - port: 80
-      targetPort: 8080
+    - port: 8080
+      targetPort: http
       protocol: TCP
       name: http
   selector:
-    name: pacman
+    app: pacman-web
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: web
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pacman-score
+  labels:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: score
+    app.kubernetes.io/part-of: pacman
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: pacman-score
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: score
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pacman-user
+  labels:
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: pacman
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    app: pacman-user
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: user

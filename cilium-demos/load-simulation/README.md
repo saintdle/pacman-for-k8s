@@ -9,6 +9,13 @@ It has two layers:
 
 ## Run
 
+Run these commands from this directory. Use the east-west demo namespace
+for both the target and its traffic generators:
+
+```bash
+export NAMESPACE=pacman-east-west
+```
+
 Deploy a target app first:
 
 ```bash
@@ -27,22 +34,22 @@ The simulator deployment runs continuously. The k6 job ramps up, holds load, and
 
 ```bash
 ./scale-frontends.sh 6
-kubectl -n pacman-demo get endpointslices -l kubernetes.io/service-name=pacman-web
+kubectl -n pacman-east-west get endpointslices -l kubernetes.io/service-name=pacman-web
 ```
 
 Scale the simulator itself when you want more source pods and more concurrent sessions:
 
 ```bash
-kubectl -n pacman-demo scale deploy/pacman-user-simulator --replicas=5
+kubectl -n pacman-east-west scale deploy/pacman-user-simulator --replicas=5
 ```
 
 ## Watch traffic
 
 ```bash
 ./watch-load.sh
-hubble observe --namespace pacman-demo --from-label app.kubernetes.io/component=load-generator --follow
-hubble observe --namespace pacman-demo --to-label app.kubernetes.io/component=web --protocol http
-hubble observe --namespace pacman-demo --to-label app.kubernetes.io/component=score --protocol http
+hubble observe --namespace pacman-east-west --from-label app.kubernetes.io/component=load-generator --follow
+hubble observe --namespace pacman-east-west --to-label app.kubernetes.io/component=web --protocol http
+hubble observe --namespace pacman-east-west --to-label app.kubernetes.io/component=score --protocol http
 ```
 
 ## Tune load
@@ -50,14 +57,14 @@ hubble observe --namespace pacman-demo --to-label app.kubernetes.io/component=sc
 Patch the simulator deployment:
 
 ```bash
-kubectl -n pacman-demo set env deploy/pacman-user-simulator USERS=100 MIN_THINK_MS=500 MAX_THINK_MS=2000
+kubectl -n pacman-east-west set env deploy/pacman-user-simulator USERS=100 MIN_THINK_MS=500 MAX_THINK_MS=2000
 ```
 
 Run another k6 job by deleting the completed one and applying the demo again:
 
 ```bash
-kubectl -n pacman-demo delete job pacman-k6-load --ignore-not-found
-kubectl -n pacman-demo apply -k .
+kubectl -n pacman-east-west delete job pacman-k6-load --ignore-not-found
+kubectl -n pacman-east-west apply -k .
 ```
 
 Useful environment values:

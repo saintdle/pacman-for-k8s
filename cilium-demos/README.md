@@ -24,7 +24,7 @@ Then open Hubble UI or use:
 
 ```bash
 cilium hubble port-forward &
-hubble observe --namespace pacman-demo --follow
+hubble observe --namespace pacman-east-west --follow
 ```
 
 ## Demo index
@@ -43,4 +43,9 @@ hubble observe --namespace pacman-demo --follow
 | [fault-demo](fault-demo/README.md) | Ten human-run Helm scenarios for faults, missing telemetry, and Tetragon observe/enforce |
 
 Each demo directory has its own README with commands and observation points.
+The east-west demo defaults to `pacman-east-west`; other demos keep the
+`pacman-demo` default. Use `NAMESPACE` to select another isolated namespace.
+The wrapper checks for persistent base resources and conflicting role ownership
+before any namespace or workload change. Do not target the persistent base
+namespace: the demo score/user roles use memory and do not preserve game data.
 The Helm scenarios have their own app/chart prerequisites; the default image above does not include all of their features.

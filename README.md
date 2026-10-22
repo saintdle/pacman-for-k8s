@@ -14,10 +14,9 @@ scripts, and a catalogue of Cilium demos.
 
 ## Pre-requisites
 
-- A Kubernetes cluster (any distribution). `ServiceType: LoadBalancer` is
-  recommended for external connectivity to the front-end. Without it, edit
-  `services/pacman-service.yaml` to use `NodePort` or `ClusterIP` and use
-  `kubectl port-forward`.
+- A Kubernetes cluster with dynamic storage. `ServiceType: LoadBalancer`
+  exposes the front-end on port `8080`. Without a LoadBalancer controller,
+  leave the Service in place and use `kubectl port-forward`.
 - Pod Security Standards labels are applied to the install namespace by
   `pacman-install.sh` (`enforce=baseline`, `audit/warn=restricted`). All
   base manifests are written to comply with the `restricted` profile
@@ -27,9 +26,10 @@ scripts, and a catalogue of Cilium demos.
 
 ## Image
 
-All manifests in this repo target `docker.io/saintdle/pacman`, pinned by
-digest (`sha256:4de4f422b5edb49b606055525c5dc29c3824446f401f6ece241d7ae6302d1fca`). The Cilium demos accept a `PACMAN_IMAGE`
-env var override.
+The raw manifests use app `0.7.16`, matching chart `0.7.17`, with all three
+roles pinned to `docker.io/saintdle/pacman@sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf`.
+Promotion updates retain the shared image pin. The Cilium demo wrapper
+accepts a `PACMAN_IMAGE` override.
 
 ## Install (base mongo-backed deployment)
 
@@ -38,22 +38,62 @@ env var override.
 NAMESPACE=my-ns ./pacman-install.sh  # custom namespace
 ```
 
-The install is idempotent (uses `kubectl apply`). Re-running it picks up
-manifest changes without errors. RBAC is rendered against the chosen
-`$NAMESPACE` so the ClusterRoleBinding subject matches the namespace you
-installed into.
+The installer checks resource ownership before writing, waits for Mongo and
+all three roles, and checks the web Service and score/user proxies. Re-running
+it updates manifests while retaining the existing PVC and Mongo Secret.
+If a retained PVC has lost its Secret, restore the matching credentials first;
+the installer refuses to replace them with sample defaults. RBAC is rendered
+against `$NAMESPACE`. A namespace containing demo-owned role resources is refused.
+
+### Upgrade from the legacy install
+
+The raw public endpoint changes from `pacman:80` to `pacman-web:8080`.
+Prepare the split stack first:
+
+```bash
+./pacman-install.sh
+kubectl -n pacman-demo get svc pacman pacman-web
+kubectl -n pacman-demo port-forward svc/pacman-web 8080:8080
+```
+
+Both entry points remain available during preparation. Check the new
+LoadBalancer address on port `8080` (or the port-forward), then update client
+URLs, DNS, firewall and Ingress settings as applicable. Once access is verified:
+
+```bash
+./pacman-install.sh --retire-legacy
+```
+
+Use the same `NAMESPACE` override for both steps. Retirement rechecks the split
+stack, then removes only `Deployment/pacman` and `Service/pacman`. Preparation
+failures retain those resources. Mongo, its PVC and credentials are reused;
+there is no data-copy migration. `kubectl apply -k .` is suitable for a fresh
+install, but does not perform this legacy retirement.
+
+The new LoadBalancer may receive a different address; continuous access and
+address retention are not guaranteed. Before retiring legacy resources, save
+their manifests. A rollback after retirement requires explicitly reapplying
+those manifests against the same Mongo data and may allocate another address.
 
 ## Uninstall
 
 ```bash
-./pacman-uninstall.sh                 # removes everything including the PVC
-./pacman-uninstall.sh keeppvc         # keep the namespace and the PVC
+./pacman-uninstall.sh                 # removes namespace, PVC and credentials
+./pacman-uninstall.sh keeppvc         # keep namespace, PVC and matching Secret
 NAMESPACE=my-ns ./pacman-uninstall.sh
 ```
 
 Use `keeppvc` to demonstrate Mongo persistence: install, play a game,
 record a high score, uninstall with `keeppvc`, install again, and the
 high score is still there.
+
+Both modes handle legacy, split and mixed installs. `keeppvc` waits for workload
+shutdown, removes the app/Mongo Services, Deployments and init ConfigMap, and
+retains the data and credentials. Neither mode removes the shared
+`pacman-clusterrole`; only the selected namespace's ClusterRoleBinding is
+removed. After all base installations are gone, an administrator may delete
+that unused ClusterRole. Full uninstall deletes the PVC; backing-volume
+retention or deletion depends on the StorageClass reclaim policy.
 
 ## Helm
 
@@ -64,6 +104,11 @@ served via GitHub Pages at
 The chart packages the same modernized Pac-Man image used by the manifests
 in this repo (pinned by digest, Pod Security Standards `restricted`),
 and supports both the MongoDB and PostgreSQL backends.
+
+Chart `0.7.17` defaults to an all-in-one app and Service port `80`. To use its
+split roles, set `--set roles.enabled=true`. These raw-manifest migration and
+uninstall scripts do not manage Helm releases; install Helm into a separate
+namespace. Use `--version 0.7.17` to reproduce the app/chart pair above.
 
 ```bash
 helm repo add veducate https://saintdle.github.io/helm-charts/
@@ -111,13 +156,16 @@ kubectl -n pacman-demo delete pvc --all   # PVCs are retained by default
 ## Cilium demo suite
 
 The [`cilium-demos`](cilium-demos) directory contains kind-based demos for
-Cilium OSS, Hubble, Gateway API, Cluster Mesh, and Tetragon. The default
-namespace is `pacman-demo`.
+Cilium OSS, Hubble, Gateway API, Cluster Mesh, and Tetragon. The east-west
+demo defaults to `pacman-east-west` and uses memory-backed roles. Other demos
+default to `pacman-demo`; choose a separate namespace when the persistent base
+is installed. The wrapper refuses persistent resources and conflicting role
+ownership before applying workloads or policy.
 
 ```bash
 ./cilium-demos/scripts/setup-single-kind.sh
 ./cilium-demos/scripts/deploy-demo.sh microservices-east-west
-./cilium-demos/scripts/deploy-demo.sh load-simulation
+NAMESPACE=pacman-east-west ./cilium-demos/scripts/deploy-demo.sh load-simulation
 ```
 
 See [`cilium-demos/README.md`](cilium-demos/README.md) for the full
@@ -125,20 +173,43 @@ catalogue and per-demo walk-throughs.
 
 ## Architecture
 
+The base install runs one container image as three roles, so the browser
+only ever talks to `pacman-web` and score/user calls become real east-west
+Service traffic that Cilium/Hubble can observe and policy-restrict at L7.
+Score and user state both live in the shared Mongo, so high scores survive
+re-installs (use `./pacman-uninstall.sh keeppvc`).
+
 ```
 Namespace (pacman-demo)
 ├── Secret               mongodb-users-secret
-├── ConfigMap            mongo-init   (mongo entrypoint user seed)
+├── ConfigMap            mongo-init      (mongo entrypoint user seed)
 ├── PVC                  mongo-storage
-├── Deployment           mongo        (mongo:8, RWO PVC, Recreate strategy)
-├── Service              mongo        (ClusterIP, 27017)
-├── Deployment           pacman       (saintdle/pacman, /healthz, /readyz)
-└── Service              pacman       (LoadBalancer, 80 → 8080)
+├── Deployment           mongo           (mongo:8, RWO PVC, Recreate strategy)
+├── Service              mongo           (ClusterIP, 27017)
+│
+├── Deployment           pacman-web      (APP_ROLE=web,   DB_TYPE=memory, replicas: 2)
+├── Service              pacman-web      (LoadBalancer, 8080 → http)
+│        │
+│        ├── SCORE_SERVICE_URL → http://pacman-score:8080
+│        └── USER_SERVICE_URL  → http://pacman-user:8080
+│
+├── Deployment           pacman-score    (APP_ROLE=score, DB_TYPE=mongo, replicas: 1)
+├── Service              pacman-score    (ClusterIP, 8080 → http)
+│
+├── Deployment           pacman-user     (APP_ROLE=user,  DB_TYPE=mongo, replicas: 1)
+└── Service              pacman-user     (ClusterIP, 8080 → http)
 ```
 
 ClusterRole / ClusterRoleBinding (cluster-scoped) grant `get/watch/list`
 on `pods` and `nodes` to the `default` ServiceAccount of the install
 namespace, used by the in-app location probe.
+
+The entry-point Service is `pacman-web` on port `8080`. Without a
+LoadBalancer, port-forward locally:
+
+```bash
+kubectl -n pacman-demo port-forward svc/pacman-web 8080:8080
+```
 
 ## Repository layout
 
@@ -150,4 +221,22 @@ security/                RBAC (rendered at install time) and Secret
 cilium-demos/            kind-based Cilium / Hubble / Tetragon demos
 pacman-install.sh        Idempotent installer (NAMESPACE override supported)
 pacman-uninstall.sh      Uninstaller with optional `keeppvc`
+tests/                  Offline regressions and opt-in disposable-cluster checks
 ```
+
+## Lifecycle validation
+
+Run the offline regression suite with `bash tests/lifecycle.sh`. The cluster
+suite requires Python 3 and an ARM64 Docker host. It is destructive within its
+named disposable kind context and test namespaces; it must never target an existing application cluster:
+
+```bash
+kind create cluster --name pacman-role-integration --kubeconfig /tmp/pacman-role-test.kubeconfig
+KUBECONFIG=/tmp/pacman-role-test.kubeconfig \
+  PACMAN_TEST_CONTEXT=kind-pacman-role-integration bash tests/lifecycle-smoke.sh
+```
+
+It checks installs, legacy migration, retained credentials/data, demo isolation
+using Kubernetes-native workloads, and both uninstall modes. It does not prove
+external LoadBalancer access or Cilium/BPF enforcement. Those need separate
+environment-specific validation. Delete the disposable cluster when finished.

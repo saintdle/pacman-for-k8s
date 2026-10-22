@@ -8,3 +8,5 @@
 .kube/
 kubeconfig
 kubeconfig.*
+.kubeconfig
+.envrc

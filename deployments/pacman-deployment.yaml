@@ -1,23 +1,34 @@
+# Multi-role Pac-Man deployment.
+#
+# One container image, three roles:
+#   - web:   serves the browser UI and forwards score/user calls east-west.
+#   - score: reads/writes high scores in Mongo via /highscores and /internal/score/*.
+#   - user:  manages user sessions and stats in Mongo via /user/* and /internal/user/*.
+#
+# All three roles run from the same docker.io/saintdle/pacman image.
+# Score and user use the Mongo backend; web uses in-memory (it only proxies).
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pacman
+  name: pacman-web
   labels:
-    name: pacman
+    app: pacman-web
     app.kubernetes.io/name: pacman
     app.kubernetes.io/component: web
     app.kubernetes.io/part-of: pacman
   annotations:
     source: "https://github.com/saintdle/pacman-for-k8s"
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
-      name: pacman
+      app.kubernetes.io/name: pacman
+      app.kubernetes.io/component: web
   template:
     metadata:
       labels:
-        name: pacman
+        app: pacman-web
         app.kubernetes.io/name: pacman
         app.kubernetes.io/component: web
         app.kubernetes.io/part-of: pacman
@@ -40,18 +51,18 @@ spec:
               drop: ["ALL"]
           ports:
             - containerPort: 8080
-              name: http-server
+              name: http
               protocol: TCP
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http-server
+              port: http
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /readyz
-              port: http-server
+              port: http
             initialDelaySeconds: 3
             periodSeconds: 5
           resources:
@@ -62,28 +73,204 @@ spec:
               cpu: 500m
               memory: 256Mi
           env:
+            - name: APP_ROLE
+              value: web
+            - name: DB_TYPE
+              value: memory
+            - name: SCORE_SERVICE_URL
+              value: http://pacman-score:8080
+            - name: USER_SERVICE_URL
+              value: http://pacman-user:8080
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pacman-score
+  labels:
+    app: pacman-score
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: score
+    app.kubernetes.io/part-of: pacman
+  annotations:
+    source: "https://github.com/saintdle/pacman-for-k8s"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pacman
+      app.kubernetes.io/component: score
+  template:
+    metadata:
+      labels:
+        app: pacman-score
+        app.kubernetes.io/name: pacman
+        app.kubernetes.io/component: score
+        app.kubernetes.io/part-of: pacman
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pacman
+          image: docker.io/saintdle/pacman@sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          env:
+            - name: APP_ROLE
+              value: score
             - name: DB_TYPE
               value: mongo
             - name: MONGO_SERVICE_HOST
               value: mongo
-            - name: MONGO_AUTH_USER
-              valueFrom:
-                secretKeyRef:
-                  key: database-user
-                  name: mongodb-users-secret
-            - name: MONGO_AUTH_PWD
-              valueFrom:
-                secretKeyRef:
-                  key: database-password
-                  name: mongodb-users-secret
-            - name: MONGO_DATABASE
-              value: pacman
             - name: MY_MONGO_PORT
               value: "27017"
+            - name: MONGO_DATABASE
+              value: pacman
             - name: MONGO_USE_SSL
               value: "false"
             - name: MONGO_VALIDATE_SSL
               value: "false"
+            - name: MONGO_AUTH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-users-secret
+                  key: database-user
+            - name: MONGO_AUTH_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-users-secret
+                  key: database-password
+            - name: MY_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pacman-user
+  labels:
+    app: pacman-user
+    app.kubernetes.io/name: pacman
+    app.kubernetes.io/component: user
+    app.kubernetes.io/part-of: pacman
+  annotations:
+    source: "https://github.com/saintdle/pacman-for-k8s"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pacman
+      app.kubernetes.io/component: user
+  template:
+    metadata:
+      labels:
+        app: pacman-user
+        app.kubernetes.io/name: pacman
+        app.kubernetes.io/component: user
+        app.kubernetes.io/part-of: pacman
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        fsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: pacman
+          image: docker.io/saintdle/pacman@sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - containerPort: 8080
+              name: http
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          env:
+            - name: APP_ROLE
+              value: user
+            - name: DB_TYPE
+              value: mongo
+            - name: MONGO_SERVICE_HOST
+              value: mongo
+            - name: MY_MONGO_PORT
+              value: "27017"
+            - name: MONGO_DATABASE
+              value: pacman
+            - name: MONGO_USE_SSL
+              value: "false"
+            - name: MONGO_VALIDATE_SSL
+              value: "false"
+            - name: MONGO_AUTH_USER
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-users-secret
+                  key: database-user
+            - name: MONGO_AUTH_PWD
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb-users-secret
+                  key: database-password
             - name: MY_NODE_NAME
               valueFrom:
                 fieldRef:
