@@ -373,7 +373,7 @@ EOF
 
 HTTP_PROBE="$(cat <<'NODE'
 (async () => {
-  const name = `native-bpf-${process.env.NATIVE_BPF_NAME}`;
+  const name = `native-bpf-${process.argv[1]}`;
   const form = (values) => new URLSearchParams(values);
   const request = async (url, options = {}) => {
     const response = await fetch(url, { ...options, signal: AbortSignal.timeout(5000) });
@@ -432,7 +432,7 @@ run_http_probe() {
   local attempt_limit=30
   for attempt in $(seq 1 "$attempt_limit"); do
     if kubectl --namespace "$CILIUM_NAMESPACE" exec "$WEB_POD" -- \
-      env "NATIVE_BPF_NAME=${RUN_TAG}" node -e "$HTTP_PROBE" >"$result" 2>"$error_file" && \
+      node -e "$HTTP_PROBE" "$RUN_TAG" >"$result" 2>"$error_file" && \
       python3 "$ROOT/tests/native_bpf_assert.py" http "$stage" "$result" >"$check_file" 2>&1; then
       cat "$check_file"
       return 0
