@@ -7,6 +7,14 @@ on:
     branches: [main]
 
 jobs:
+  native-bpf-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v5
+      - name: Run native BPF CPU-only regressions
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'native_bpf_*_test.py'
+
   lifecycle:
     runs-on: ubuntu-latest
     steps:

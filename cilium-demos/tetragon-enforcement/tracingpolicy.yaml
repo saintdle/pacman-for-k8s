@@ -6,7 +6,6 @@ spec:
   kprobes:
     - call: security_bprm_check
       syscall: false
-      return: true
       args:
         - index: 0
           type: linux_binprm
@@ -20,7 +19,6 @@ spec:
             - action: Post
     - call: security_file_open
       syscall: false
-      return: true
       args:
         - index: 0
           type: file
