@@ -25,7 +25,7 @@ def file_event(namespace="native-tetragon", pod="pacman-tetragon-demo-abc"):
             "policy_name": POLICY_NAME,
             "function_name": "security_file_open",
             "process": {"pod": {"namespace": namespace, "name": pod}},
-            "args": [{"file_arg": {"path": "/etc/hostname"}}],
+            "args": [{"file_arg": {"path": "/app/demo-fixtures/synthetic-secret.txt"}}],
         }
     }
 
@@ -78,6 +78,7 @@ class TetragonAssertionsTest(unittest.TestCase):
             ("namespace", lambda event: event["process_kprobe"]["process"]["pod"].update(namespace="other"), "native-tetragon", "pacman-tetragon-demo-abc"),
             ("pod", lambda event: event["process_kprobe"]["process"]["pod"].update(name="other"), "native-tetragon", "pacman-tetragon-demo-abc"),
             ("path", lambda event: event["process_kprobe"]["args"][0]["file_arg"].update(path="/etc/passwd"), "native-tetragon", "pacman-tetragon-demo-abc"),
+            ("stale default path", lambda event: event["process_kprobe"]["args"][0]["file_arg"].update(path="/etc/hostname"), "native-tetragon", "pacman-tetragon-demo-abc"),
             ("policy", lambda event: event["process_kprobe"].update(policy_name="other"), "native-tetragon", "pacman-tetragon-demo-abc"),
         ):
             with self.subTest(reason=reason):

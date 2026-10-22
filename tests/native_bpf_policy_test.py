@@ -7,6 +7,7 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 POLICY_PATH = REPO_ROOT / "cilium-demos/tetragon-enforcement/tracingpolicy.yaml"
+DEMO_MANIFEST_PATH = REPO_ROOT / "cilium-demos/tetragon-enforcement/tetragon-demo.yaml"
 
 
 def _kprobe_specs(document):
@@ -94,6 +95,25 @@ class TetragonReturnContractTest(unittest.TestCase):
             with self.subTest(reason=reason):
                 invalid = "  kprobes:\n    - call: sk_alloc\n      return: true\n" + return_arg
                 self.assertEqual(1, len(_return_capture_errors(invalid)))
+
+    def test_demo_manifest_enables_the_routes_used_by_the_probes(self):
+        manifest = DEMO_MANIFEST_PATH.read_text(encoding="utf-8")
+        environment = dict(
+            re.findall(
+                r"(?m)^            - name: ([A-Z][A-Z0-9_]*)\n              value: ([^\n]+)$",
+                manifest,
+            )
+        )
+        self.assertEqual(
+            {
+                "DEMO_FILE_PROBE_ENABLED": "true",
+                "DEMO_EXEC_PROBE_ENABLED": "true",
+            },
+            {name: environment.get(name, "").strip(" '\"") for name in (
+                "DEMO_FILE_PROBE_ENABLED",
+                "DEMO_EXEC_PROBE_ENABLED",
+            )},
+        )
 
 
 if __name__ == "__main__":

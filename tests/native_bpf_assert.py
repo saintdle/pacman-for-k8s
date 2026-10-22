@@ -23,6 +23,7 @@ HTTP_ROUTES = (
 )
 HTTP_SCORE_VERSION = {"baseline": 200, "active": 403, "recovery": 200}
 POLICY_NAME = "pacman-demo-process-and-file-observe"
+FILE_PROBE_PATH = "/app/demo-fixtures/synthetic-secret.txt"
 
 
 def assert_http_observation(stage: str, value: Any) -> None:
@@ -83,7 +84,7 @@ def _matching_file_event(
         if not isinstance(arg, Mapping):
             continue
         file_arg = _field(arg, "file_arg", "fileArg")
-        if isinstance(file_arg, Mapping) and file_arg.get("path") == "/etc/hostname":
+        if isinstance(file_arg, Mapping) and file_arg.get("path") == FILE_PROBE_PATH:
             return True
     return False
 
@@ -127,7 +128,7 @@ def assert_tetragon_events(
             return
     missing = []
     if not found_file:
-        missing.append("policy-correlated security_file_open for /etc/hostname")
+        missing.append(f"policy-correlated security_file_open for {FILE_PROBE_PATH}")
     if not found_exec:
         missing.append("child Node process_exec containing demo-exec-probe")
     raise ValueError(
