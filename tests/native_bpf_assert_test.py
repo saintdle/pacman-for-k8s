@@ -35,10 +35,14 @@ def exec_event(namespace="native-tetragon", pod="pacman-tetragon-demo-abc"):
         "process_exec": {
             "process": {
                 "pod": {"namespace": namespace, "name": pod},
-                "binary": "/usr/local/bin/node",
-                "arguments": "node /app/tools/demo-exec-probe.js",
+                "binary": "/app/tools/demo-exec-probe.js",
+                "arguments": "/app/tools/demo-exec-probe.js",
             },
-            "parent": {"pod": {"namespace": namespace, "name": pod}},
+            "parent": {
+                "pod": {"namespace": namespace, "name": pod},
+                "binary": "/nodejs/bin/node",
+                "arguments": "src/server.js",
+            },
         }
     }
 
@@ -92,7 +96,10 @@ class TetragonAssertionsTest(unittest.TestCase):
             ("namespace", lambda event: event["process_exec"]["process"]["pod"].update(namespace="other")),
             ("pod", lambda event: event["process_exec"]["process"]["pod"].update(name="other")),
             ("parent pod", lambda event: event["process_exec"]["parent"]["pod"].update(name="other")),
+            ("parent namespace", lambda event: event["process_exec"]["parent"]["pod"].update(namespace="other")),
             ("binary", lambda event: event["process_exec"]["process"].update(binary="/bin/sh")),
+            ("arbitrary Node with helper marker", lambda event: event["process_exec"]["process"].update(binary="/nodejs/bin/node")),
+            ("wrong helper binary path", lambda event: event["process_exec"]["process"].update(binary="/tmp/demo-exec-probe.js")),
             ("arguments", lambda event: event["process_exec"]["process"].update(arguments="node other.js")),
         ):
             with self.subTest(reason=reason):
