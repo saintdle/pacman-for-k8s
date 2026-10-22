@@ -7,6 +7,12 @@ on:
     branches: [main]
 
 jobs:
+  lifecycle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: bash tests/lifecycle.sh
+
   yamllint:
     runs-on: ubuntu-latest
     steps:
