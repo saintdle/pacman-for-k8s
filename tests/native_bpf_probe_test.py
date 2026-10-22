@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -14,6 +15,7 @@ from pathlib import Path
 
 
 RUNNER = Path(__file__).with_name("native-bpf.sh")
+POLICY = RUNNER.parent.parent / "cilium-demos/microservices-east-west/cilium-network-policy.yaml"
 RUN_TAG = "probe-run-42x"
 EXPECTED_NAME = f"native-bpf-{RUN_TAG}"
 STAGES = ("baseline", "active", "recovery")
@@ -44,6 +46,9 @@ globalThis.fetch = async (input, options = {}) => {
     fs.appendFileSync(process.env.NATIVE_BPF_REQUEST_LOG, JSON.stringify({
       stage: process.env.NATIVE_BPF_TEST_STAGE,
       name,
+        host: url.host,
+        request_target: url.pathname + url.search,
+        method: options.method || 'GET',
     }) + '\\n');
   }
   const status = url.href === 'http://pacman-score:8080/version' &&
@@ -140,6 +145,39 @@ raise SystemExit(result.returncode)
             with self.subTest(stage=stage):
                 names = Counter(record["name"] for record in records if record["stage"] == stage)
                 self.assertEqual(names, Counter({EXPECTED_NAME: 5}))
+
+        policy_text = POLICY.read_text(encoding="utf-8")
+        user_marker = "        app.kubernetes.io/component: user\n"
+        self.assertEqual(policy_text.count(user_marker), 1)
+        user_rules = policy_text.split(user_marker, 1)[1].split("\n  - endpointSelector:", 1)[0]
+        session_rules = [
+            value.strip().strip("'\"")
+            for value in re.findall(
+                r"(?m)^[ ]+- method: GET[ ]*\n[ ]+path: ([^\n]+)$", user_rules
+            )
+            if "/internal/user/session" in value
+        ]
+        self.assertEqual(len(session_rules), 1, "expected one user-session GET path rule")
+        session_rule = session_rules[0]
+        session_records = [
+            record for record in records
+            if record["host"] == "pacman-user:8080"
+            and record["request_target"].startswith("/internal/user/session")
+        ]
+        self.assertEqual(len(session_records), len(STAGES))
+        for record in session_records:
+            self.assertEqual(record["method"], "GET")
+            self.assertRegex(
+                record["request_target"], re.compile(r"\A" + session_rule + r"\Z"),
+            )
+        self.assertIsNotNone(re.fullmatch(session_rule, "/internal/user/session"))
+        for denied_target in (
+            f"/internal/user/sessions?name={EXPECTED_NAME}",
+            "/internal/user/session?other=1",
+            f"/internal/user/session?name={EXPECTED_NAME}&other=1",
+        ):
+            with self.subTest(denied_target=denied_target):
+                self.assertIsNone(re.fullmatch(session_rule, denied_target))
 
 
 if __name__ == "__main__":
