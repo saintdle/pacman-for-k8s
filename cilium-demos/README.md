@@ -49,3 +49,17 @@ The wrapper checks for persistent base resources and conflicting role ownership
 before any namespace or workload change. Do not target the persistent base
 namespace: the demo score/user roles use memory and do not preserve game data.
 The Helm scenarios have their own app/chart prerequisites; the default image above does not include all of their features.
+
+## Native BPF integration workflow
+
+`.github/workflows/native-bpf.yml` runs manually or nightly on a native Ubuntu
+amd64 runner. It creates an isolated Kind cluster, applies the checked-in
+east-west workloads and policy, and verifies allow, explicit L7-deny, and
+policy-removal recovery behavior. It then installs the checked-in observe-only
+Tetragon policy and requires correlated file-open and child-process events from
+the demo pod. The workflow is not a required pull-request check. Manual and
+scheduled runs become available after the workflow reaches the default branch.
+
+Static checks cannot prove that kernel BPF hooks ran; Cilium and Tetragon runtime
+behavior remains unverified until a native hosted workflow run passes. The
+Tetragon policy only observes events and does not enforce actions.

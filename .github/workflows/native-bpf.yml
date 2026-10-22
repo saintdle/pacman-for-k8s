@@ -1,0 +1,42 @@
+name: native-bpf
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 4 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  native-amd64:
+    name: Cilium and Tetragon on native amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Run native BPF assertion and deadline tests before provisioning
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'native_bpf_*_test.py'
+        timeout-minutes: 2
+
+      - name: Prepare bounded diagnostics directory
+        run: install -d -m 700 "$EVIDENCE_DIR"
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/native-bpf-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Run native BPF integration
+        run: bash tests/native-bpf.sh
+        timeout-minutes: 23
+        env:
+          EVIDENCE_DIR: ${{ runner.temp }}/native-bpf-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload bounded diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        timeout-minutes: 3
+        with:
+          name: native-bpf-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-bpf-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 14
