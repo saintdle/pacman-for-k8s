@@ -7,11 +7,20 @@ import json, os, pathlib, subprocess, sys, tempfile
 
 root = pathlib.Path(sys.argv[1])
 fake = r'''#!/usr/bin/env python3
-import json, os, pathlib, re, sys
+import fcntl, json, os, pathlib, re, sys, time
 p = pathlib.Path(os.environ['FAKE_STATE'])
-s = json.loads(p.read_text()); args = sys.argv[1:]
+args = sys.argv[1:]
 if args[:1] == ['-n']: args = args[2:]
 cmd = args[0]
+manifest_content = None
+if cmd in ('apply', 'delete') and '-f' in args:
+    manifest_path = args[args.index('-f')+1]
+    manifest_content = sys.stdin.read() if manifest_path == '-' else pathlib.Path(manifest_path).read_text()
+lock_file = p.with_name(p.name + '.lock').open('a')
+fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+s = json.loads(p.read_text())
+test_delay = float(os.environ.get('FAKE_STATE_TEST_READ_DELAY', '0'))
+if test_delay: time.sleep(test_delay)
 s['calls'].append(args)
 def save(): p.write_text(json.dumps(s))
 def done(text='', code=0):
@@ -50,9 +59,7 @@ if cmd == 'create' and '--dry-run=client' in args: done('namespace')
 if cmd in ('apply', 'label', 'create', 'delete', 'set'):
     s['mutations'].append(args)
     if cmd in ('apply', 'delete') and '-f' in args:
-        name = args[args.index('-f')+1]
-        if name == '-': content = sys.stdin.read()
-        else: content = pathlib.Path(name).read_text()
+        content = manifest_content
         # Identify actual manifest objects without a test-only YAML dependency.
         objects = []
         for doc in re.split(r'^---\s*$', content, flags=re.M):
@@ -117,6 +124,54 @@ with tempfile.TemporaryDirectory() as t:
     def check(name, condition):
         print(('PASS ' if condition else 'FAIL ')+name)
         if not condition: failures.append(name)
+    race_state_file=p/'concurrent-state.json'
+    race_state_file.write_text(json.dumps({'objects':{},'calls':[],'mutations':[]}))
+    race_env={**os.environ,'PATH':str(p)+os.pathsep+os.environ['PATH'],
+              'FAKE_STATE':str(race_state_file),'NAMESPACE':'test',
+              'FAKE_STATE_TEST_READ_DELAY':'0.5'}
+    producer=subprocess.Popen([str(p/'kubectl'),'create','namespace','test',
+                               '--dry-run=client','-o','yaml'],env=race_env,cwd=root,
+                              stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+    consumer=subprocess.Popen([str(p/'kubectl'),'apply','-f','-'],env=race_env,cwd=root,
+                              stdin=producer.stdout,stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,text=True)
+    producer.stdout.close()
+    try:
+        _,consumer_error=consumer.communicate(timeout=10)
+        producer.wait(timeout=10)
+        producer_error=producer.stderr.read()
+    except subprocess.TimeoutExpired:
+        for process in (producer,consumer):
+            if process.poll() is None: process.kill()
+        producer.wait(); consumer.wait()
+        raise
+    try:
+        race_state=json.loads(race_state_file.read_text())
+    except json.JSONDecodeError:
+        race_state={}
+    race_calls=race_state.get('calls',[])
+    check('concurrent namespace create/apply preserves fake state',
+          producer.returncode==0 and consumer.returncode==0 and len(race_calls)==2 and
+          {call[0] for call in race_calls}=={'create','apply'})
+    race_state_file.write_text(json.dumps({'objects':{},'calls':[],'mutations':[]}))
+    workers=[subprocess.Popen([str(p/'kubectl'),'get','namespace/test'],env=race_env,cwd=root,
+                              stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+             for _ in range(2)]
+    try:
+        worker_results=[worker.communicate(timeout=10) for worker in workers]
+    except subprocess.TimeoutExpired:
+        for worker in workers:
+            if worker.poll() is None: worker.kill()
+        for worker in workers: worker.wait()
+        raise
+    try:
+        race_state=json.loads(race_state_file.read_text())
+    except json.JSONDecodeError:
+        race_state={}
+    race_calls=race_state.get('calls',[])
+    check('concurrent fake kubectl calls preserve both state updates',
+          all(worker.returncode==0 for worker in workers) and len(race_calls)==2 and
+          all(call[:2]==['get','namespace/test'] for call in race_calls))
     for mode in ('legacy','split','mixed'):
         r,s=run('pacman-uninstall.sh',('keeppvc',),objects(mode))
         check(mode+' keeppvc removes union',r.returncode==0 and not any(k.startswith(('deploy/','svc/','configmap/')) for k in s['objects']))
