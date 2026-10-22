@@ -59,13 +59,19 @@ jobs:
                 -ignore-missing-schemas \
                 /tmp/rendered-rbac.yaml
 
+      - name: Test advisory schema validation
+        continue-on-error: true
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'kubeconform_schema_test.py'
+
       - name: Validate Cilium CRDs (advisory)
         continue-on-error: true
         run: |
-          SCHEMA_LOCATIONS="default https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
-          git ls-files 'cilium-demos/**/*.yaml' 2>/dev/null \
+          SCHEMA_LOCATION="https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json"
+          # Helm values are configuration inputs, not Kubernetes resources.
+          git ls-files 'cilium-demos/**/*.yaml' ':(exclude,glob)cilium-demos/**/values/*.yaml' 2>/dev/null \
             | xargs --no-run-if-empty kubeconform \
                 -kubernetes-version 1.30.0 \
                 -summary \
                 -ignore-missing-schemas \
-                -schema-location "$SCHEMA_LOCATIONS"
+                -schema-location default \
+                -schema-location "$SCHEMA_LOCATION"
