@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from collections.abc import Iterable, Mapping
 from pathlib import Path
@@ -23,6 +22,8 @@ HTTP_ROUTES = (
 )
 HTTP_SCORE_VERSION = {"baseline": 200, "active": 403, "recovery": 200}
 POLICY_NAME = "pacman-demo-process-and-file-observe"
+FILE_PROBE_PATH = "/app/demo-fixtures/synthetic-secret.txt"
+EXEC_PROBE_PATH = "/app/tools/demo-exec-probe.js"
 
 
 def assert_http_observation(stage: str, value: Any) -> None:
@@ -83,7 +84,7 @@ def _matching_file_event(
         if not isinstance(arg, Mapping):
             continue
         file_arg = _field(arg, "file_arg", "fileArg")
-        if isinstance(file_arg, Mapping) and file_arg.get("path") == "/etc/hostname":
+        if isinstance(file_arg, Mapping) and file_arg.get("path") == FILE_PROBE_PATH:
             return True
     return False
 
@@ -101,12 +102,10 @@ def _matching_exec_event(event: Mapping[str, Any], namespace: str, pod: str) -> 
     if not isinstance(process, Mapping):
         return False
     binary = process.get("binary")
-    if not isinstance(binary, str) or os.path.basename(binary) not in {"node", "nodejs"}:
-        return False
     arguments = process.get("arguments")
     if isinstance(arguments, list):
         arguments = " ".join(str(part) for part in arguments)
-    return isinstance(arguments, str) and "demo-exec-probe" in arguments
+    return binary == EXEC_PROBE_PATH and isinstance(arguments, str) and "demo-exec-probe" in arguments
 
 
 def assert_tetragon_events(
@@ -127,9 +126,9 @@ def assert_tetragon_events(
             return
     missing = []
     if not found_file:
-        missing.append("policy-correlated security_file_open for /etc/hostname")
+        missing.append(f"policy-correlated security_file_open for {FILE_PROBE_PATH}")
     if not found_exec:
-        missing.append("child Node process_exec containing demo-exec-probe")
+        missing.append(f"child process_exec for {EXEC_PROBE_PATH} containing demo-exec-probe")
     raise ValueError(
         f"missing Tetragon event(s) for {namespace}/{pod}: " + " and ".join(missing)
     )

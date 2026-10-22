@@ -134,7 +134,7 @@ specs:
                 - method: POST
                   path: /user/stats
                 - method: GET
-                  path: /internal/user/session
+                  path: '/internal/user/session(\?name=[^&]*)?$'
                 - method: GET
                   path: /internal/user/stats
                 - method: POST
