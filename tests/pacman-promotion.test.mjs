@@ -97,9 +97,19 @@ test('workflow filter preserves only a newer coherent proposal and advances past
 });
 
 test('applied rollback state requires explicit resume even after its proposal closes', () => {
-  const currentState = { mode: 'rollback' };
+  const currentState = { ...current, mode: 'rollback', rollback: {
+    target_app_reference: current.app.reference, target_app_sha256: current.app.sha256,
+    target_chart_reference: current.chart.reference, target_chart_sha256: current.chart.sha256,
+    reason: 'Restore the last known-good chart',
+  } };
   assert.equal(rollbackRequiresExplicitResume({ currentState, pendingState: null, mode: 'reconcile' }), true);
   assert.equal(rollbackRequiresExplicitResume({ currentState, pendingState: null, mode: 'resume' }), false);
+  assert.equal(rollbackRequiresExplicitResume({ currentState: { ...current, mode: 'automatic' }, pendingState: null, mode: 'resume' }), true);
+  assert.equal(rollbackRequiresExplicitResume({ currentState: { mode: 'rollback' }, pendingState: null, mode: 'resume' }), true);
+  assert.throws(() => planConsumerPromotion({ current: { ...newer, mode: 'automatic' }, candidate: current, mode: 'resume' }), /applied rollback/);
+  assert.deepEqual(planConsumerPromotion({ current: currentState, candidate: newer, mode: 'resume' }),
+    { action: 'resume', app: newer.app, chart: newer.chart });
+  assert.throws(() => planConsumerPromotion({ current: currentState, candidate: fixture('old-event.json'), mode: 'resume' }), /cannot be older/);
 });
 
 test('workflow query uses supported branch filtering and requests repository identity', () => {

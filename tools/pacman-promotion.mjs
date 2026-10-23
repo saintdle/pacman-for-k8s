@@ -36,6 +36,16 @@ export function validateAppReleaseMetadata(bytes, expected) {
   }
   return metadata;
 }
+function hasAppliedRollbackState(state) {
+  return state?.mode === 'rollback'
+    && typeof state.app?.reference === 'string' && shaRe.test(state.app?.sha256 ?? '')
+    && typeof state.chart?.reference === 'string' && shaRe.test(state.chart?.sha256 ?? '')
+    && state.rollback?.target_app_reference === state.app.reference
+    && state.rollback?.target_app_sha256 === state.app.sha256
+    && state.rollback?.target_chart_reference === state.chart.reference
+    && state.rollback?.target_chart_sha256 === state.chart.sha256
+    && typeof state.rollback?.reason === 'string' && state.rollback.reason.trim().length >= 8;
+}
 function versionFromAsset(reference) {
   const match = /\/releases\/download\/pacman-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/(?:app-release-record|release-metadata)\.json$/.exec(reference ?? '');
   if (!match) fail('app release reference does not identify a supported immutable release asset');
@@ -50,19 +60,29 @@ export function planConsumerPromotion({ current, candidate, pending, mode = 'rec
   if (!['reconcile', 'rollback', 'resume'].includes(mode)) fail('unsupported promotion mode');
   const appOrder = compareVersion(candidate.app.version, current.app.version);
   const chartOrder = compareVersion(candidate.chart.version, current.chart.version);
-  if (mode === 'rollback') {
-    if (appOrder > 0 || chartOrder > 0 || (appOrder === 0 && chartOrder === 0)) fail('rollback target must be an older explicit app or chart identity');
-    if (reason.trim().length < 8) fail('rollback proposal requires a reason of at least 8 characters');
-    return { action: 'rollback-proposal', app: candidate.app, chart: candidate.chart, rollback_reason: reason.trim() };
-  }
-  if (mode === 'resume') return { action: 'resume', app: candidate.app, chart: candidate.chart };
-  if (appOrder < 0 || chartOrder < 0) return { action: 'noop', reason: 'older-release-event' };
   const assertSameIdentity = (axis, left, right, fields) => {
     for (const [field, label] of fields) {
       const a = left[field], b = right[field];
       if (a !== undefined || b !== undefined) if (!a || !b || a !== b) fail(`same ${axis} version has a conflicting ${label}`);
     }
   };
+  if (mode === 'rollback') {
+    if (appOrder > 0 || chartOrder > 0 || (appOrder === 0 && chartOrder === 0)) fail('rollback target must be an older explicit app or chart identity');
+    if (reason.trim().length < 8) fail('rollback proposal requires a reason of at least 8 characters');
+    return { action: 'rollback-proposal', app: candidate.app, chart: candidate.chart, rollback_reason: reason.trim() };
+  }
+  if (mode === 'resume') {
+    if (!hasAppliedRollbackState(current)) fail('resume requires an applied rollback state');
+    if (appOrder < 0 || chartOrder < 0) fail('resume candidate cannot be older than the applied rollback state');
+    if (appOrder === 0) assertSameIdentity('app', candidate.app, current.app, [
+      ['image_manifest_list_digest', 'image digest'], ['reference', 'record reference'], ['sha256', 'record checksum'], ['source_commit', 'source commit'],
+    ]);
+    if (chartOrder === 0) assertSameIdentity('chart', candidate.chart, current.chart, [
+      ['package_sha256', 'package checksum'], ['reference', 'record reference'], ['sha256', 'record checksum'],
+    ]);
+    return { action: 'resume', app: candidate.app, chart: candidate.chart };
+  }
+  if (appOrder < 0 || chartOrder < 0) return { action: 'noop', reason: 'older-release-event' };
   if (appOrder === 0) assertSameIdentity('app', candidate.app, current.app, [
     ['image_manifest_list_digest', 'image digest'], ['reference', 'record reference'], ['sha256', 'record checksum'], ['source_commit', 'source commit'],
   ]);
@@ -97,8 +117,8 @@ export function selectPendingProposalState({ state, pullRequests, branchSha, bas
 }
 
 export function rollbackRequiresExplicitResume({ currentState, pendingState, mode }) {
-  return mode !== 'resume' && mode !== 'rollback'
-    && (currentState?.mode === 'rollback' || pendingState?.mode === 'rollback');
+  if (mode === 'resume') return !hasAppliedRollbackState(currentState);
+  return mode !== 'rollback' && (currentState?.mode === 'rollback' || pendingState?.mode === 'rollback');
 }
 
 export function validateChartRecord(record, bytes, release, packageBytes) {
