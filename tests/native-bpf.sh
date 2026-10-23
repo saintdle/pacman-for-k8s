@@ -20,6 +20,8 @@ CLUSTER_ATTEMPT_MARKER="$STATE_DIR/cluster-attempted"
 PORT_FORWARD_PID_FILE="$STATE_DIR/port-forward.pid"
 KUSTOMIZE_DIR_FILE="$STATE_DIR/kustomize-dir"
 KUSTOMIZE_DIR=""
+CILIUM_KUSTOMIZE_DIR=""
+TETRAGON_KUSTOMIZE_DIR=""
 PORT_FORWARD_PID=""
 KIND_CONFIG="${RUNNER_TEMP_DIR}/native-bpf-kind-${RUN_TAG}.yaml"
 
@@ -217,6 +219,9 @@ preflight() {
   [[ -r /sys/fs/cgroup/cgroup.controllers ]] || fail "cgroup v2 is required for kube-proxy replacement" || return
   command -v curl >/dev/null || fail "curl is required" || return
   command -v sha256sum >/dev/null || fail "sha256sum is required" || return
+  command -v git >/dev/null || fail "git is required to verify immutable source tags" || return
+  command -v jq >/dev/null || fail "jq is required for bounded candidate identity checks" || return
+  command -v python3 >/dev/null || fail "python3 is required for candidate identity checks" || return
   command -v timeout >/dev/null || fail "GNU timeout is required" || return
   command -v setsid >/dev/null || fail "setsid is required to contain the port-forward process group" || return
   command -v docker >/dev/null || fail "Docker is required by Kind" || return
@@ -355,10 +360,22 @@ download_and_install_cilium() {
 }
 
 write_workload_kustomization() {
-  KUSTOMIZE_DIR="$(mktemp -d "$ROOT/cilium-demos/.native-bpf-workloads.XXXXXXXX")"
+  local image_repository image_digest
+  KUSTOMIZE_DIR="$(mktemp -d "$RUNNER_TEMP_DIR/native-bpf-kustomize-${RUN_TAG}.XXXXXXXX")"
   printf '%s\n' "$KUSTOMIZE_DIR" >"$KUSTOMIZE_DIR_FILE"
-  cp "$ROOT/cilium-demos/microservices-east-west/workloads.yaml" "$KUSTOMIZE_DIR/workloads.yaml"
-  cat >"$KUSTOMIZE_DIR/kustomization.yaml" <<EOF
+  CILIUM_KUSTOMIZE_DIR="$KUSTOMIZE_DIR/cilium"
+  TETRAGON_KUSTOMIZE_DIR="$KUSTOMIZE_DIR/tetragon"
+  mkdir -p "$CILIUM_KUSTOMIZE_DIR" "$TETRAGON_KUSTOMIZE_DIR"
+  image_repository="$(jq -r '.candidate.app.image_repository' "$EVIDENCE_DIR/candidate-identity.json")"
+  image_digest="$(jq -r '.candidate.app.image_manifest_list_digest' "$EVIDENCE_DIR/candidate-identity.json")"
+  cp "$ROOT/cilium-demos/microservices-east-west/workloads.yaml" "$CILIUM_KUSTOMIZE_DIR/workloads.yaml"
+  cp "$ROOT/cilium-demos/tetragon-enforcement/tetragon-demo.yaml" "$TETRAGON_KUSTOMIZE_DIR/tetragon-demo.yaml"
+  cp "$ROOT/cilium-demos/tetragon-enforcement/tracingpolicy.yaml" "$TETRAGON_KUSTOMIZE_DIR/tracingpolicy.yaml"
+  python3 "$ROOT/tests/native_bpf_candidate.py" rewrite-version \
+    --identity "$EVIDENCE_DIR/candidate-identity.json" --manifest "$CILIUM_KUSTOMIZE_DIR/workloads.yaml"
+  python3 "$ROOT/tests/native_bpf_candidate.py" rewrite-version \
+    --identity "$EVIDENCE_DIR/candidate-identity.json" --manifest "$TETRAGON_KUSTOMIZE_DIR/tetragon-demo.yaml"
+  cat >"$CILIUM_KUSTOMIZE_DIR/kustomization.yaml" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: ${CILIUM_NAMESPACE}
@@ -368,7 +385,44 @@ labels:
     includeSelectors: false
 resources:
   - workloads.yaml
+images:
+  - name: docker.io/saintdle/pacman
+    newName: ${image_repository}
+    digest: ${image_digest}
 EOF
+  cat >"$TETRAGON_KUSTOMIZE_DIR/kustomization.yaml" <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - tetragon-demo.yaml
+  - tracingpolicy.yaml
+images:
+  - name: docker.io/saintdle/pacman
+    newName: ${image_repository}
+    digest: ${image_digest}
+EOF
+}
+
+VERSION_PROBE='fetch("http://127.0.0.1:8080/version").then(async response => { if (!response.ok) throw new Error(`/version returned ${response.status}`); console.log(JSON.stringify(await response.json())); }).catch(error => { console.error(error.message); process.exitCode = 1; });'
+
+verify_candidate_pods() {
+  local namespace="$1" name="$2" pods_file="$EVIDENCE_DIR/${name}-pods.json"
+  local runtime_file="$EVIDENCE_DIR/${name}-runtime.jsonl" pod_rows pod role runtime_file_one
+  kubectl --namespace "$namespace" get pods \
+    --selector app.kubernetes.io/part-of=pacman-cilium-demo --output=json >"$pods_file"
+  pod_rows="$(jq -r '.items[] | select(.status.phase == "Running" and .metadata.deletionTimestamp == null) | [.metadata.name, .metadata.labels["app.kubernetes.io/component"]] | @tsv' "$pods_file")"
+  [[ -n "$pod_rows" ]] || fail "$namespace has no running Pac-Man candidate pods"
+  : >"$runtime_file"
+  while IFS=$'\t' read -r pod role; do
+    [[ -n "$pod" && -n "$role" ]] || fail "$namespace returned a candidate pod without a name or role"
+    runtime_file_one="$EVIDENCE_DIR/${name}-${pod}-version.json"
+    kubectl --namespace "$namespace" exec "$pod" --container pacman -- node -e "$VERSION_PROBE" >"$runtime_file_one"
+    printf '{"pod":"%s","version":%s}\n' "$pod" "$(cat "$runtime_file_one")" >>"$runtime_file"
+  done <<<"$pod_rows"
+  python3 "$ROOT/tests/native_bpf_candidate.py" verify-pods \
+    --identity "$EVIDENCE_DIR/candidate-identity.json" \
+    --pods "$pods_file" --runtimes "$runtime_file" \
+    --output "$EVIDENCE_DIR/${name}-candidate-identity.json"
 }
 
 HTTP_PROBE="$(cat <<'NODE'
@@ -448,10 +502,11 @@ run_cilium_integration() {
   write_workload_kustomization
   kubectl create namespace "$CILIUM_NAMESPACE"
   # The temporary Kustomization preserves the checked-in namespace and cluster RBAC transformations.
-  kubectl apply -k "$KUSTOMIZE_DIR"
+  kubectl apply -k "$CILIUM_KUSTOMIZE_DIR"
   for deployment in pacman-web pacman-score pacman-user; do
     kubectl --namespace "$CILIUM_NAMESPACE" rollout status "deployment/$deployment" --timeout=240s
   done
+  verify_candidate_pods "$CILIUM_NAMESPACE" cilium
   WEB_POD="$(kubectl --namespace "$CILIUM_NAMESPACE" get pods \
     --selector app.kubernetes.io/name=pacman,app.kubernetes.io/component=web \
     --output=jsonpath='{.items[0].metadata.name}')"
@@ -521,8 +576,9 @@ check_demo_probe() {
 run_tetragon_integration() {
   local tetra_pod attempt event_start
   kubectl create namespace "$TETRAGON_NAMESPACE"
-  kubectl --namespace "$TETRAGON_NAMESPACE" apply -k "$ROOT/cilium-demos/tetragon-enforcement"
+  kubectl --namespace "$TETRAGON_NAMESPACE" apply -k "$TETRAGON_KUSTOMIZE_DIR"
   kubectl --namespace "$TETRAGON_NAMESPACE" rollout status deployment/pacman-tetragon-demo --timeout=240s
+  verify_candidate_pods "$TETRAGON_NAMESPACE" tetragon
   kubectl --namespace "$TETRAGON_NAMESPACE" get pod \
     --selector app.kubernetes.io/name=pacman,app.kubernetes.io/component=web -o wide \
     >"$EVIDENCE_DIR/tetragon-demo-pods.txt"
@@ -574,6 +630,8 @@ run_tetragon_integration() {
 main() {
   log "Native BPF integration: $CLUSTER_NAME"
   preflight
+  run_with_timeout "${NATIVE_BPF_CANDIDATE_TIMEOUT_SECONDS:-240}" python3 "$ROOT/tests/native_bpf_candidate.py" \
+    prepare --root "$ROOT" --evidence-dir "$EVIDENCE_DIR"
   download_tools
   export PATH="$TOOL_DIR:$PATH"
   write_kind_config

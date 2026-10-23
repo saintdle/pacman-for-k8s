@@ -1,6 +1,7 @@
-name: native-bpf
+name: Native BPF
 
 on:
+  pull_request:
   workflow_dispatch:
   schedule:
     - cron: '17 4 * * *'
@@ -10,29 +11,59 @@ permissions:
 
 jobs:
   native-amd64:
-    name: Cilium and Tetragon on native amd64
+    name: native-amd64
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Select native runtime coverage for this pull request
+        id: selection
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          changed_paths="$RUNNER_TEMP/native-bpf-changed-paths"
+          changed_diff="$RUNNER_TEMP/native-bpf-changed-diff"
+          : >"$changed_paths"
+          : >"$changed_diff"
+          if [[ "$EVENT_NAME" == pull_request ]]; then
+            git diff --name-only --no-renames "$BASE_SHA...$HEAD_SHA" >"$changed_paths"
+            git diff --no-ext-diff --unified=0 "$BASE_SHA...$HEAD_SHA" >"$changed_diff"
+          fi
+          selection="$(python3 tests/native_bpf_relevance.py \
+            --event "$EVENT_NAME" --paths "$changed_paths" --diff "$changed_diff")"
+          printf '%s\n' "$selection" >>"$GITHUB_OUTPUT"
+
+      - name: Report successful no-op for unrelated pull request
+        if: github.event_name == 'pull_request' && steps.selection.outputs.run_native == 'false'
+        run: |
+          echo 'PASS: no native BPF runtime changes; native-bpf / native-amd64 is an explicit no-op.'
 
       - name: Run native BPF assertion and deadline tests before provisioning
+        if: steps.selection.outputs.run_native == 'true'
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'native_bpf_*_test.py'
         timeout-minutes: 2
 
       - name: Prepare bounded diagnostics directory
+        if: steps.selection.outputs.run_native == 'true'
         run: install -d -m 700 "$EVIDENCE_DIR"
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/native-bpf-evidence-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Run native BPF integration
+        if: steps.selection.outputs.run_native == 'true'
         run: bash tests/native-bpf.sh
         timeout-minutes: 23
         env:
           EVIDENCE_DIR: ${{ runner.temp }}/native-bpf-evidence-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload bounded diagnostics
-        if: always()
+        if: always() && steps.selection.outputs.run_native == 'true'
         uses: actions/upload-artifact@v4
         timeout-minutes: 3
         with:
