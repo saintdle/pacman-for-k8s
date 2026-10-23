@@ -28,6 +28,14 @@ function exactKeys(value, keys, name) {
 }
 function checksum(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
 function releaseAssetUrl(repo, tag, name) { return `https://github.com/${repo}/releases/download/${tag}/${name}`; }
+export function validateAppReleaseMetadata(bytes, expected) {
+  const metadata = JSON.parse(bytes.toString());
+  exactKeys(metadata, ['version', 'tag', 'commit', 'image_digest', 'app_record_ref', 'app_record_sha256'], 'release metadata');
+  for (const key of ['version', 'tag', 'commit', 'image_digest', 'app_record_ref', 'app_record_sha256']) {
+    if (metadata[key] !== expected[key]) fail('release metadata does not pin the app record bytes and identity');
+  }
+  return metadata;
+}
 function versionFromAsset(reference) {
   const match = /\/releases\/download\/pacman-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/(?:app-release-record|release-metadata)\.json$/.exec(reference ?? '');
   if (!match) fail('app release reference does not identify a supported immutable release asset');
@@ -74,6 +82,23 @@ export function planConsumerPromotion({ current, candidate, pending, mode = 'rec
   }
   if (appOrder === 0 && chartOrder === 0) return { action: 'noop', reason: 'already-promoted' };
   return { action: 'promotion', app: candidate.app, chart: candidate.chart };
+}
+
+export function selectPendingProposalState({ state, pullRequests, branchSha, baseSha, stateKind = 'pacman-k8s-promotion-state' }) {
+  if (!isObject(state) || state.schema_version !== 1 || state.kind !== stateKind
+    || !['automatic', 'rollback'].includes(state.mode) || !Array.isArray(pullRequests)
+    || !digestRe.test(state.app?.image_manifest_list_digest ?? '') || !shaRe.test(state.chart?.package_sha256 ?? '')) return null;
+  try { version(state.app.version, 'pending app version'); version(state.chart.version, 'pending chart version'); }
+  catch { return null; }
+  const matches = pullRequests.filter((proposal) => proposal?.state === 'OPEN' && proposal.isCrossRepository === false
+    && proposal.headRefName === 'automation/pacman-promotion' && proposal.headRefOid === branchSha
+    && proposal.baseRefName === 'main' && proposal.baseRefOid === baseSha);
+  return matches.length === 1 ? state : null;
+}
+
+export function rollbackRequiresExplicitResume({ currentState, pendingState, mode }) {
+  return mode !== 'resume' && mode !== 'rollback'
+    && (currentState?.mode === 'rollback' || pendingState?.mode === 'rollback');
 }
 
 export function validateChartRecord(record, bytes, release, packageBytes) {
@@ -146,11 +171,9 @@ async function verifyApp(versionValue, expectedRef, expectedSha, expectedDigest)
     for (const platform of ['linux/amd64', 'linux/arm64']) if (!record.platforms.some((item) => item.platform === platform && digestRe.test(item.digest))) fail(`app record lacks ${platform}`);
     if (expectedDigest && expectedDigest !== record.image.manifest_list_digest) fail('app record conflicts with chart package');
     const metadataAsset = await verifiedAsset(rel, 'release-metadata.json');
-    const metadata = JSON.parse(metadataAsset.data.toString());
     const pinned = { version: versionValue, tag, commit: record.source.commit, image_digest: record.image.manifest_list_digest,
       app_record_ref: recAsset.url, app_record_sha256: recAsset.checksum };
-    if (Object.keys(metadata).sort().join(',') !== ['app_record_ref', 'app_record_sha256', 'commit', 'image_digest', 'tag', 'version'].sort().join(',')
-      || JSON.stringify(metadata) !== JSON.stringify(pinned)) fail('release metadata does not pin the app record bytes and identity');
+    validateAppReleaseMetadata(metadataAsset.data, pinned);
     if (await tagCommit(appRepo, tag) !== record.source.commit) fail('app record source commit does not match immutable release tag');
     const registry = execFileSync('docker', ['buildx', 'imagetools', 'inspect', `${imageRepo}@${record.image.manifest_list_digest}`], { encoding: 'utf8' });
     if (!new RegExp(`^Digest:\\s+${record.image.manifest_list_digest.replace(':', ':')}$`, 'm').test(registry)) fail('app record digest is not present in the registry');
@@ -266,13 +289,21 @@ async function selectLatestChart() {
 function readState(path) { try { return JSON.parse(readFileSync(path, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } }
 async function main() {
   const [command, planPath, statePath] = process.argv.slice(2);
+  if (command === 'filter-pending') {
+    const pending = readState(planPath);
+    const proposals = JSON.parse(readFileSync(statePath, 'utf8'));
+    const selected = selectPendingProposalState({ state: pending, pullRequests: proposals,
+      branchSha: process.env.PENDING_BRANCH_SHA, baseSha: process.env.PENDING_BASE_SHA });
+    writeFileSync(process.env.PENDING_FILTERED_PATH, `${JSON.stringify(selected)}\n`);
+    return;
+  }
   if (command === 'plan') {
     const current = JSON.parse(readFileSync(process.env.CURRENT_STATE_PATH, 'utf8'));
     const state = readState(process.env.PENDING_STATE_PATH);
-    if (state?.mode === 'rollback' && process.env.PROMOTION_MODE !== 'resume' && process.env.PROMOTION_MODE !== 'rollback') {
+    const mode = process.env.PROMOTION_MODE || 'reconcile';
+    if (rollbackRequiresExplicitResume({ currentState: current, pendingState: state, mode })) {
       writeFileSync(planPath, JSON.stringify({ action: 'noop', reason: 'rollback-proposal-pending' }, null, 2) + '\n'); return;
     }
-    const mode = process.env.PROMOTION_MODE || 'reconcile';
     const rollback = mode === 'rollback' ? await rollbackCandidate() : null;
     const candidate = rollback?.app ? { app: rollback.app, chart: rollback.chart } : await selectLatestChart();
     const plan = planConsumerPromotion({ current, candidate, pending: state?.mode === 'automatic' ? state : null, mode,

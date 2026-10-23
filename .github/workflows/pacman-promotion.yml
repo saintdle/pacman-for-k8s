@@ -69,6 +69,8 @@ jobs:
 
       - name: Read current and pending identities
         id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           current=pacman-promotion-state.json
@@ -78,9 +80,19 @@ jobs:
             echo "chart_version=$(jq -r '.chart.version' "$current")"
             echo "image_digest=$(jq -r '.app.image_manifest_list_digest' "$current")"
           } >> "$GITHUB_OUTPUT"
+          branch_sha=""
+          printf 'null\n' > /tmp/pacman-branch-state.json
           if git fetch --quiet origin +refs/heads/automation/pacman-promotion:refs/remotes/origin/automation/pacman-promotion 2>/dev/null; then
-            git show refs/remotes/origin/automation/pacman-promotion:pacman-promotion-state.json > /tmp/pacman-pending-state.json || true
+            if ! git show refs/remotes/origin/automation/pacman-promotion:pacman-promotion-state.json > /tmp/pacman-branch-state.json 2>/dev/null; then
+              printf 'null\n' > /tmp/pacman-branch-state.json
+            fi
+            branch_sha=$(git rev-parse refs/remotes/origin/automation/pacman-promotion)
           fi
+          gh pr list --repo saintdle/pacman-for-k8s --head automation/pacman-promotion --base main --state all \
+            --json state,headRefName,headRefOid,baseRefName,baseRefOid,isCrossRepository > /tmp/pacman-promotion-prs.json
+          PENDING_BRANCH_SHA="$branch_sha" PENDING_BASE_SHA="$(git rev-parse HEAD)" \
+            PENDING_FILTERED_PATH=/tmp/pacman-pending-state.json \
+            node tools/pacman-promotion.mjs filter-pending /tmp/pacman-branch-state.json /tmp/pacman-promotion-prs.json
 
       - name: Verify authoritative chart and app assets and plan
         id: plan
@@ -122,7 +134,7 @@ jobs:
           mapfile -t files < <(git grep -l -E 'docker\.io/saintdle/pacman@sha256:[0-9a-f]{64}' -- '*.yaml' '*.yml')
           [[ ${#files[@]} -gt 0 ]]
           for file in "${files[@]}"; do
-            yq -i '(.. | select(tag == "!!map" and has("image")) | .image) |= (if test("^docker.io/saintdle/pacman@sha256:[a-f0-9]{64}$") then strenv(PACMAN_IMAGE) else . end)' "$file"
+            yq -i '(.. | select(tag == "!!map" and has("image") and (.image | tag == "!!str") and (.image | test("^docker.io/saintdle/pacman@sha256:[a-f0-9]{64}$"))) | .image) = strenv(PACMAN_IMAGE)' "$file"
           done
           node tools/pacman-promotion.mjs update-docs
           node tools/pacman-promotion.mjs write-state /tmp/pacman-promotion-plan.json pacman-promotion-state.json
@@ -135,7 +147,7 @@ jobs:
           pip install yamllint
           yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: disable, comments: disable, indentation: disable}}" .
           python3 -m unittest tests.kubeconform_schema_test
-          test -z "$(rg -l 'docker\.io/saintdle/pacman@sha256:(?!${{ steps.plan.outputs.digest }})' --pcre2 --glob '*.yaml' --glob '*.yml' . || true)"
+          test -z "$(rg -l 'docker\.io/saintdle/pacman@(?!${{ steps.plan.outputs.digest }})sha256:[a-f0-9]{64}' --pcre2 --glob '*.yaml' --glob '*.yml' . || true)"
 
       - name: Open or update the one promotion proposal PR
         if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
