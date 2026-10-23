@@ -403,13 +403,50 @@ images:
 EOF
 }
 
-VERSION_PROBE='fetch("http://127.0.0.1:8080/version").then(async response => { if (!response.ok) throw new Error(`/version returned ${response.status}`); console.log(JSON.stringify(await response.json())); }).catch(error => { console.error(error.message); process.exitCode = 1; });'
+VERSION_PROBE='fetch("http://127.0.0.1:8080/version").then(async response => { if (!response.ok) throw new Error(`/version returned ${response.status}`); console.log(JSON.stringify(await response.json())); }).catch(error => { const diagnostic = { message: String(error?.message ?? error).slice(0, 500) }; const cause = error?.cause; if (cause && typeof cause === "object") { const details = {}; for (const key of ["code", "address", "port"]) { const value = cause[key]; if (typeof value === "string" || typeof value === "number") details[key] = typeof value === "string" ? value.slice(0, 200) : value; } if (Object.keys(details).length > 0) diagnostic.cause = details; } console.error(JSON.stringify(diagnostic)); process.exitCode = 1; });'
+
+capture_version_probe_failure() {
+  local namespace="$1" pod="$2" name="$3" stderr_file="$4" probe_status="$5"
+  local error_file="$EVIDENCE_DIR/${name}-${pod}-version-probe-error.txt"
+  local app_logs_file="$EVIDENCE_DIR/${name}-${pod}-app-logs.txt"
+  local pod_state_file="$EVIDENCE_DIR/${name}-${pod}-pod-state.json"
+
+  {
+    head -c 4096 "$stderr_file" 2>/dev/null || true
+    printf '\nprobe exit status: %s\n' "$probe_status"
+  } >"$error_file"
+
+  timeout --signal=TERM --kill-after=1s "${DIAGNOSTIC_TIMEOUT_SECONDS}s" \
+    kubectl --namespace "$namespace" logs "$pod" --container pacman --timestamps=true --tail=80 2>&1 \
+    | tail -c 16384 >"$app_logs_file" || true
+
+  if ! kubectl --namespace "$namespace" get pod "$pod" --output=json 2>/dev/null \
+    | jq -c '{
+        name: .metadata.name,
+        namespace: .metadata.namespace,
+        phase: .status.phase,
+        conditions: [.status.conditions[]? | {type, status, reason, lastTransitionTime}],
+        pacman: [.status.containerStatuses[]? | select(.name == "pacman") | {
+          ready,
+          restartCount,
+          state: (if .state.waiting then {waitingReason: .state.waiting.reason}
+                  elif .state.running then {runningStartedAt: .state.running.startedAt}
+                  elif .state.terminated then {terminatedReason: .state.terminated.reason, exitCode: .state.terminated.exitCode, startedAt: .state.terminated.startedAt, finishedAt: .state.terminated.finishedAt}
+                  else {} end),
+          lastTerminated: (if .lastState.terminated then {reason: .lastState.terminated.reason, exitCode: .lastState.terminated.exitCode, startedAt: .lastState.terminated.startedAt, finishedAt: .lastState.terminated.finishedAt} else null end)
+        }]
+      }' >"$pod_state_file"; then
+    printf '{"available":false}\n' >"$pod_state_file"
+  fi
+
+  cat "$error_file" >&2 || true
+}
 
 verify_candidate_pods() {
   local namespace="$1" name="$2"
   local pods_file="$EVIDENCE_DIR/${name}-pods.json"
   local runtime_file="$EVIDENCE_DIR/${name}-runtime.jsonl" pod_rows pod role node runtime_file_one
-  local image_reference kind_nodes node_info_file runtime_version cri_inspect_file cri_file
+  local image_reference kind_nodes node_info_file runtime_version cri_inspect_file cri_file probe_stderr_file probe_status
   image_reference="$(jq -er '.candidate.image_reference' "$EVIDENCE_DIR/candidate-identity.json")"
   kind_nodes="$(run_with_timeout 30 kind get nodes --name "$CLUSTER_NAME")"
   [[ -n "$kind_nodes" ]] || fail "owned Kind cluster has no nodes"
@@ -422,7 +459,15 @@ verify_candidate_pods() {
     [[ -n "$pod" && -n "$role" && -n "$node" ]] || fail "$namespace returned a candidate pod without a name, role, or assigned node"
     grep -Fxq -- "$node" <<<"$kind_nodes" || fail "$namespace pod $pod is not on a node owned by Kind cluster $CLUSTER_NAME"
     runtime_file_one="$EVIDENCE_DIR/${name}-${pod}-version.json"
-    kubectl --namespace "$namespace" exec "$pod" --container pacman -- node -e "$VERSION_PROBE" >"$runtime_file_one"
+    probe_stderr_file="$STATE_DIR/${name}-${pod}-version-probe.stderr"
+    if kubectl --namespace "$namespace" exec "$pod" --container pacman -- node -e "$VERSION_PROBE" >"$runtime_file_one" 2>"$probe_stderr_file"; then
+      rm -f "$probe_stderr_file"
+    else
+      probe_status=$?
+      capture_version_probe_failure "$namespace" "$pod" "$name" "$probe_stderr_file" "$probe_status" || true
+      rm -f "$probe_stderr_file" || true
+      return "$probe_status"
+    fi
     node_info_file="$EVIDENCE_DIR/${name}-${node}-node.json"
     cri_inspect_file="$EVIDENCE_DIR/${name}-${node}-cri-inspect.json"
     cri_file="$EVIDENCE_DIR/${name}-${node}-cri.json"
