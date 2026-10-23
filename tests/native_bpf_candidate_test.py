@@ -180,19 +180,138 @@ class CandidateArtifactTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "appVersion"):
             verify_chart_contents(candidate, "name: pacman\nversion: 0.7.17\nappVersion: 0.7.15\n", "image:\n  digest: x\n")
 
-    def test_pod_requires_candidate_spec_platform_image_id_and_runtime_source(self):
+    def test_pod_accepts_captured_list_id_only_with_verified_cri_mapping(self):
         candidate = load_candidate(ROOT)
+        manifest_list = candidate["app"]["image_manifest_list_digest"]
         platform = "sha256:" + "c" * 64
+        config = "sha256:" + "e" * 64
+        identity = {
+            "candidate": candidate,
+            "platform_digests": {"linux/amd64": platform, "linux/arm64": "sha256:" + "d" * 64},
+            "amd64_config_digest": config,
+            "oci_source_revision": candidate["app"]["source_commit"],
+        }
         pod = {
             "metadata": {"name": "pacman-web-abc", "labels": {"app.kubernetes.io/component": "web"}},
-            "spec": {"containers": [{"name": "pacman", "image": candidate["image_reference"]}]},
-            "status": {"phase": "Running", "containerStatuses": [{"name": "pacman", "imageID": f"containerd://{platform}"}]},
+            "spec": {"nodeName": "native-control-plane", "containers": [{"name": "pacman", "image": candidate["image_reference"]}]},
+            "status": {"phase": "Running", "containerStatuses": [{
+                "name": "pacman", "imageID": f"{candidate['app']['image_repository']}@{manifest_list}"
+            }]},
         }
         runtime = {"app": "pacman", "role": "web", "version": candidate["app"]["version"], "commit": candidate["app"]["source_commit"]}
-        self.assertEqual(assert_pod_identity(pod, candidate, platform, runtime)["image_id"], platform)
-        pod["spec"]["containers"][0]["image"] = "docker.io/saintdle/pacman:latest"
-        with self.assertRaisesRegex(ValueError, "pod spec"):
-            assert_pod_identity(pod, candidate, platform, runtime)
+        cri = {
+            "node": "native-control-plane",
+            "container_runtime_version": "containerd://2.0.3",
+            "image_reference": candidate["image_reference"],
+            "inspect": {"status": {"id": config, "repoDigests": [f"{candidate['app']['image_repository']}@{platform}"]}},
+        }
+        verified = assert_pod_identity(pod, identity, runtime, cri)
+        self.assertEqual(verified["image_id_digest"], manifest_list)
+        self.assertEqual(verified["amd64_manifest_digest"], platform)
+        self.assertEqual(verified["amd64_config_digest"], config)
+        self.assertEqual(verified["cri_image_id"], config)
+        self.assertEqual(verified["node"], "native-control-plane")
+        self.assertEqual(verified["container_runtime_version"], "containerd://2.0.3")
+
+    def test_pod_accepts_platform_id_only_with_verified_cri_mapping(self):
+        candidate = load_candidate(ROOT)
+        manifest_list = candidate["app"]["image_manifest_list_digest"]
+        platform = "sha256:" + "c" * 64
+        config = "sha256:" + "e" * 64
+        identity = {
+            "candidate": candidate,
+            "platform_digests": {"linux/amd64": platform, "linux/arm64": "sha256:" + "d" * 64},
+            "amd64_config_digest": config,
+            "oci_source_revision": candidate["app"]["source_commit"],
+        }
+        pod = {
+            "metadata": {"name": "pacman-web-abc", "labels": {"app.kubernetes.io/component": "web"}},
+            "spec": {"nodeName": "native-control-plane", "containers": [{"name": "pacman", "image": candidate["image_reference"]}]},
+            "status": {"phase": "Running", "containerStatuses": [{
+                "name": "pacman", "imageID": f"docker-pullable://{candidate['app']['image_repository']}@{platform}"
+            }]},
+        }
+        runtime = {"app": "pacman", "role": "web", "version": candidate["app"]["version"], "commit": candidate["app"]["source_commit"]}
+        cri = {
+            "node": "native-control-plane",
+            "container_runtime_version": "containerd://2.0.3",
+            "image_reference": candidate["image_reference"],
+            "inspect": {"status": {"id": config, "repoDigests": [f"{candidate['app']['image_repository']}@{manifest_list}"]}},
+        }
+        verified = assert_pod_identity(pod, identity, runtime, cri)
+        self.assertEqual(verified["image_id_digest"], platform)
+
+    def test_pod_rejects_unlinked_image_and_wrong_cri_config_or_repository(self):
+        candidate = load_candidate(ROOT)
+        manifest_list = candidate["app"]["image_manifest_list_digest"]
+        platform = "sha256:" + "c" * 64
+        config = "sha256:" + "e" * 64
+        identity = {
+            "candidate": candidate,
+            "platform_digests": {"linux/amd64": platform, "linux/arm64": "sha256:" + "d" * 64},
+            "amd64_config_digest": config,
+            "oci_source_revision": candidate["app"]["source_commit"],
+        }
+        pod = {
+            "metadata": {"name": "pacman-web-abc", "labels": {"app.kubernetes.io/component": "web"}},
+            "spec": {"nodeName": "native-control-plane", "containers": [{"name": "pacman", "image": candidate["image_reference"]}]},
+            "status": {"phase": "Running", "containerStatuses": [{"name": "pacman", "imageID": f"{candidate['app']['image_repository']}@{manifest_list}"}]},
+        }
+        runtime = {"app": "pacman", "role": "web", "version": candidate["app"]["version"], "commit": candidate["app"]["source_commit"]}
+        cri = {
+            "node": "native-control-plane",
+            "container_runtime_version": "containerd://2.0.3",
+            "image_reference": candidate["image_reference"],
+            "inspect": {"status": {"id": config, "repoDigests": [f"{candidate['app']['image_repository']}@{manifest_list}"]}},
+        }
+        cases = (
+            (lambda item, witness: item["status"]["containerStatuses"][0].update(imageID=f"{candidate['app']['image_repository']}@sha256:{'f' * 64}"), cri, "not linked"),
+            (lambda item, witness: item["status"]["containerStatuses"][0].update(imageID=f"docker.io/wrong/pacman@{manifest_list}"), cri, "repository"),
+            (lambda item, witness: witness["inspect"]["status"].update(id="sha256:" + "a" * 64), cri, "config digest"),
+            (lambda item, witness: witness["inspect"]["status"].update(repoDigests=[f"docker.io/wrong/pacman@{manifest_list}"]), cri, "repository"),
+            (lambda item, witness: item["spec"]["containers"][0].update(image="docker.io/saintdle/pacman:latest"), cri, "pod spec"),
+        )
+        for mutate, witness, message in cases:
+            with self.subTest(message=message):
+                current_pod = json.loads(json.dumps(pod))
+                current_witness = json.loads(json.dumps(witness))
+                mutate(current_pod, current_witness)
+                with self.assertRaisesRegex(ValueError, message):
+                    assert_pod_identity(current_pod, identity, runtime, current_witness)
+
+    def test_pod_rejects_wrong_runtime_source_and_version(self):
+        candidate = load_candidate(ROOT)
+        manifest_list = candidate["app"]["image_manifest_list_digest"]
+        identity = {
+            "candidate": candidate,
+            "platform_digests": {"linux/amd64": "sha256:" + "c" * 64, "linux/arm64": "sha256:" + "d" * 64},
+            "amd64_config_digest": "sha256:" + "e" * 64,
+            "oci_source_revision": candidate["app"]["source_commit"],
+        }
+        pod = {
+            "metadata": {"name": "pacman-web-abc", "labels": {"app.kubernetes.io/component": "web"}},
+            "spec": {"nodeName": "native-control-plane", "containers": [{"name": "pacman", "image": candidate["image_reference"]}]},
+            "status": {"phase": "Running", "containerStatuses": [{"name": "pacman", "imageID": f"{candidate['app']['image_repository']}@{manifest_list}"}]},
+        }
+        runtime = {"app": "pacman", "role": "web", "version": candidate["app"]["version"], "commit": candidate["app"]["source_commit"]}
+        cri = {
+            "node": "native-control-plane", "container_runtime_version": "containerd://2.0.3",
+            "image_reference": candidate["image_reference"],
+            "inspect": {"status": {"id": identity["amd64_config_digest"], "repoDigests": [f"{candidate['app']['image_repository']}@{manifest_list}"]}},
+        }
+        for mutation, message in (
+            (lambda value: value.update(commit="0" * 40), "source commit"),
+            (lambda value: value.update(version="9.9.9"), "app version"),
+        ):
+            with self.subTest(message=message):
+                current_runtime = dict(runtime)
+                mutation(current_runtime)
+                with self.assertRaisesRegex(ValueError, message):
+                    assert_pod_identity(pod, identity, current_runtime, cri)
+        wrong_oci_source = dict(identity)
+        wrong_oci_source["oci_source_revision"] = "0" * 40
+        with self.assertRaisesRegex(ValueError, "verified OCI source revision"):
+            assert_pod_identity(pod, wrong_oci_source, runtime, cri)
 
 
 if __name__ == "__main__":

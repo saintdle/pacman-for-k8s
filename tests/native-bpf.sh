@@ -408,17 +408,40 @@ VERSION_PROBE='fetch("http://127.0.0.1:8080/version").then(async response => { i
 verify_candidate_pods() {
   local namespace="$1" name="$2"
   local pods_file="$EVIDENCE_DIR/${name}-pods.json"
-  local runtime_file="$EVIDENCE_DIR/${name}-runtime.jsonl" pod_rows pod role runtime_file_one
+  local runtime_file="$EVIDENCE_DIR/${name}-runtime.jsonl" pod_rows pod role node runtime_file_one
+  local image_reference kind_nodes node_info_file runtime_version cri_inspect_file cri_file
+  image_reference="$(jq -er '.candidate.image_reference' "$EVIDENCE_DIR/candidate-identity.json")"
+  kind_nodes="$(run_with_timeout 30 kind get nodes --name "$CLUSTER_NAME")"
+  [[ -n "$kind_nodes" ]] || fail "owned Kind cluster has no nodes"
   kubectl --namespace "$namespace" get pods \
     --selector app.kubernetes.io/part-of=pacman-cilium-demo --output=json >"$pods_file"
-  pod_rows="$(jq -r '.items[] | select(.status.phase == "Running" and .metadata.deletionTimestamp == null) | [.metadata.name, .metadata.labels["app.kubernetes.io/component"]] | @tsv' "$pods_file")"
+  pod_rows="$(jq -r '.items[] | select(.status.phase == "Running" and .metadata.deletionTimestamp == null) | [.metadata.name, .metadata.labels["app.kubernetes.io/component"], .spec.nodeName] | @tsv' "$pods_file")"
   [[ -n "$pod_rows" ]] || fail "$namespace has no running Pac-Man candidate pods"
   : >"$runtime_file"
-  while IFS=$'\t' read -r pod role; do
-    [[ -n "$pod" && -n "$role" ]] || fail "$namespace returned a candidate pod without a name or role"
+  while IFS=$'\t' read -r pod role node; do
+    [[ -n "$pod" && -n "$role" && -n "$node" ]] || fail "$namespace returned a candidate pod without a name, role, or assigned node"
+    grep -Fxq -- "$node" <<<"$kind_nodes" || fail "$namespace pod $pod is not on a node owned by Kind cluster $CLUSTER_NAME"
     runtime_file_one="$EVIDENCE_DIR/${name}-${pod}-version.json"
     kubectl --namespace "$namespace" exec "$pod" --container pacman -- node -e "$VERSION_PROBE" >"$runtime_file_one"
-    printf '{"pod":"%s","version":%s}\n' "$pod" "$(cat "$runtime_file_one")" >>"$runtime_file"
+    node_info_file="$EVIDENCE_DIR/${name}-${node}-node.json"
+    cri_inspect_file="$EVIDENCE_DIR/${name}-${node}-cri-inspect.json"
+    cri_file="$EVIDENCE_DIR/${name}-${node}-cri.json"
+    if [[ ! -s "$cri_file" ]]; then
+      kubectl get node "$node" --output=json >"$node_info_file"
+      runtime_version="$(jq -er '.status.nodeInfo.containerRuntimeVersion | strings | select(length > 0)' "$node_info_file")"
+      [[ "$runtime_version" == containerd://* && -n "${runtime_version#containerd://}" \
+        && "${runtime_version#containerd://}" != *[[:space:]]* ]] \
+        || fail "$node does not report a valid containerd runtime version"
+      run_with_timeout 30 docker exec "$node" crictl inspecti "$image_reference" >"$cri_inspect_file"
+      jq -e '.status.id and (.status.repoDigests | type == "array" and length > 0)' "$cri_inspect_file" >/dev/null \
+        || fail "$node CRI did not report the candidate image config ID and repository digests"
+      jq -cn --arg node "$node" --arg container_runtime_version "$runtime_version" \
+        --arg image_reference "$image_reference" --slurpfile inspect "$cri_inspect_file" \
+        '{node:$node,container_runtime_version:$container_runtime_version,image_reference:$image_reference,inspect:$inspect[0]}' \
+        >"$cri_file"
+    fi
+    jq -cn --arg pod "$pod" --slurpfile version "$runtime_file_one" --slurpfile cri "$cri_file" \
+      '{pod:$pod,version:$version[0],cri:$cri[0]}' >>"$runtime_file"
   done <<<"$pod_rows"
   python3 "$ROOT/tests/native_bpf_candidate.py" verify-pods \
     --identity "$EVIDENCE_DIR/candidate-identity.json" \

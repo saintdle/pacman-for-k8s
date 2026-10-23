@@ -345,18 +345,36 @@ def resolve_platform_digests(index: Any, recorded: dict[str, str] | None = None)
     return result
 
 
-def normalize_image_id(value: Any) -> str:
-    if not isinstance(value, str):
-        return ""
-    match = re.search(r"sha256:[a-f0-9]{64}\Z", value)
-    return match.group(0) if match else value
+def _image_id_repository(value: Any, name: str) -> tuple[str | None, str]:
+    _require(isinstance(value, str), f"{name} must be a digest or repository digest reference")
+    raw = value
+    for scheme in ("docker-pullable://", "docker://", "containerd://"):
+        if raw.startswith(scheme):
+            raw = raw[len(scheme):]
+            break
+    if "@" in raw:
+        repository, digest = raw.rsplit("@", 1)
+        _require(bool(repository), f"{name} repository is empty")
+        return repository, _digest(digest, name)
+    return None, _digest(raw, name)
 
 
-def assert_pod_identity(pod: dict[str, Any], candidate: dict[str, Any], platform_digest: str,
-                        runtime: dict[str, Any]) -> dict[str, str]:
+def assert_pod_identity(pod: dict[str, Any], identity: dict[str, Any],
+                        runtime: dict[str, Any], cri: dict[str, Any]) -> dict[str, Any]:
     name = pod.get("metadata", {}).get("name", "<unnamed>")
     _require(pod.get("status", {}).get("phase") == "Running" and not pod.get("metadata", {}).get("deletionTimestamp"),
              f"{name} is not a running candidate workload")
+    candidate = _obj(identity.get("candidate"), "verified candidate identity")
+    app = _obj(candidate.get("app"), "candidate app")
+    image_repository = app.get("image_repository")
+    _require(isinstance(image_repository, str) and image_repository,
+             "candidate app image repository is missing")
+    manifest_list_digest = _digest(app.get("image_manifest_list_digest"), "candidate manifest-list digest")
+    platform_digests = _obj(identity.get("platform_digests"), "verified OCI platform descriptors")
+    platform_digest = _digest(platform_digests.get("linux/amd64"), "verified amd64 manifest digest")
+    config_digest = _digest(identity.get("amd64_config_digest"), "verified amd64 config digest")
+    _require(identity.get("oci_source_revision") == app.get("source_commit"),
+             "verified OCI source revision does not match candidate source commit")
     role = pod.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component")
     _require(isinstance(role, str) and role, f"{name} has no Pac-Man workload role")
     containers = pod.get("spec", {}).get("containers", [])
@@ -366,15 +384,61 @@ def assert_pod_identity(pod: dict[str, Any], candidate: dict[str, Any], platform
     statuses = pod.get("status", {}).get("containerStatuses", [])
     status = next((item for item in statuses if item.get("name") == "pacman"), None)
     _require(status is not None, f"{name} has no pacman container status")
-    image_id = normalize_image_id(status.get("imageID"))
-    _require(image_id == platform_digest, f"{name} runtime image ID {image_id!r} does not match amd64 OCI descriptor")
-    expected = candidate["app"]
+    pod_image_id = status.get("imageID")
+    reported_repository, image_id_digest = _image_id_repository(pod_image_id, f"{name} runtime image ID")
+    _require(image_id_digest in {manifest_list_digest, platform_digest},
+             f"{name} runtime image ID is not linked to the candidate manifest list or amd64 descriptor")
+    if reported_repository is not None:
+        _require(reported_repository == image_repository,
+                 f"{name} runtime image repository does not match candidate repository")
+
+    pod_node = pod.get("spec", {}).get("nodeName")
+    _require(isinstance(pod_node, str) and pod_node, f"{name} has no assigned node")
+    _require(cri.get("node") == pod_node, f"{name} CRI evidence is not from its assigned node")
+    container_runtime_version = cri.get("container_runtime_version")
+    _require(isinstance(container_runtime_version, str) and container_runtime_version.startswith("containerd://")
+             and len(container_runtime_version) > len("containerd://"),
+             f"{name} has no containerd runtime version evidence")
+    _require(cri.get("image_reference") == candidate["image_reference"],
+             f"{name} CRI evidence does not inspect the candidate image reference")
+    cri_status = _obj(_obj(cri.get("inspect"), f"{name} CRI image inspect").get("status"),
+                      f"{name} CRI image status")
+    cri_image_id = _digest(cri_status.get("id"), f"{name} CRI image config ID")
+    _require(cri_image_id == config_digest,
+             f"{name} CRI image config digest does not match verified amd64 OCI config")
+    repo_digests = cri_status.get("repoDigests")
+    _require(isinstance(repo_digests, list) and repo_digests,
+             f"{name} CRI image has no repository digests")
+    linked_repo_digests: list[str] = []
+    for repo_digest in repo_digests:
+        repository, digest = _image_id_repository(repo_digest, f"{name} CRI repository digest")
+        if repository == image_repository and digest in {manifest_list_digest, platform_digest}:
+            linked_repo_digests.append(repo_digest)
+    _require(linked_repo_digests,
+             f"{name} CRI repository digests do not link the candidate image to the verified OCI descriptors")
+
+    expected = app
     _require(runtime.get("app") == "pacman" and runtime.get("role") == role,
              f"{name} runtime app or role does not match its workload")
     _require(runtime.get("version") == expected["version"], f"{name} runtime app version does not match candidate")
     _require(runtime.get("commit") == expected["source_commit"], f"{name} runtime source commit does not match candidate")
-    return {"pod": name, "role": role, "image": container["image"], "image_id": image_id,
-            "version": runtime["version"], "commit": runtime["commit"]}
+    return {
+        "pod": name,
+        "role": role,
+        "image": container["image"],
+        "image_id": pod_image_id,
+        "image_id_digest": image_id_digest,
+        "version": runtime["version"],
+        "commit": runtime["commit"],
+        "node": pod_node,
+        "container_runtime_version": container_runtime_version,
+        "oci_manifest_list_digest": manifest_list_digest,
+        "amd64_manifest_digest": platform_digest,
+        "amd64_config_digest": config_digest,
+        "cri_image_id": cri_image_id,
+        "cri_repo_digests": repo_digests,
+        "cri_linked_repo_digests": linked_repo_digests,
+    }
 
 
 def _read_url(url: str, headers: dict[str, str] | None = None) -> tuple[bytes, dict[str, str]]:
@@ -509,13 +573,15 @@ def verify_candidate_artifacts(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         "candidate": candidate,
         "platform_digests": platform_digests,
+        "amd64_config_digest": config_digest,
         "oci_source_revision": image_revision,
         "chart_package_sha256": chart["package_sha256"],
         "chart_release_record_verified": chart_record_verified,
         "app_source_tag_verified": True,
         "chart_source_tag_verified": chart_tag_verified,
         "verified": ["app-release-asset", "app-source-tag", "chart-package-sha256", "chart-metadata",
-                     "oci-manifest-list", "oci-platform-descriptors", "oci-config-source-label"],
+                     "oci-manifest-list", "oci-platform-descriptors", "oci-amd64-config-digest",
+                     "oci-config-source-label"],
         "missing_evidence": candidate["missing_evidence"],
     }
 
@@ -532,7 +598,7 @@ def rewrite_app_version(manifest: Path, version: str) -> None:
     manifest.write_text(updated, encoding="utf-8")
 
 
-def verify_pods(identity: dict[str, Any], pods: Any, runtimes: dict[str, Any]) -> list[dict[str, str]]:
+def verify_pods(identity: dict[str, Any], pods: Any, runtimes: dict[str, Any]) -> list[dict[str, Any]]:
     items = _obj(pods, "Kubernetes pod list").get("items")
     _require(isinstance(items, list) and items, "native scenario has no running Pac-Man pods")
     outputs = []
@@ -540,11 +606,13 @@ def verify_pods(identity: dict[str, Any], pods: Any, runtimes: dict[str, Any]) -
         if pod.get("status", {}).get("phase") != "Running" or pod.get("metadata", {}).get("deletionTimestamp"):
             continue
         name = pod.get("metadata", {}).get("name", "<unnamed>")
-        runtime = runtimes.get(name)
-        _require(isinstance(runtime, dict), f"{name} has no runtime /version evidence")
-        outputs.append(assert_pod_identity(
-            pod, identity["candidate"], identity["platform_digests"]["linux/amd64"], runtime,
-        ))
+        runtime_evidence = runtimes.get(name)
+        _require(isinstance(runtime_evidence, dict), f"{name} has no runtime /version or CRI evidence")
+        version = runtime_evidence.get("version")
+        cri = runtime_evidence.get("cri")
+        _require(isinstance(version, dict), f"{name} has no runtime /version evidence")
+        _require(isinstance(cri, dict), f"{name} has no node CRI image evidence")
+        outputs.append(assert_pod_identity(pod, identity, version, cri))
     _require(outputs, "native scenario has no running Pac-Man pods")
     return outputs
 
@@ -589,10 +657,10 @@ def main() -> int:
             for line in Path(args.runtimes).read_text(encoding="utf-8").splitlines():
                 if line.strip():
                     item = json.loads(line)
-                    runtime_map[item["pod"]] = item["version"]
+                    runtime_map[item["pod"]] = {"version": item.get("version"), "cri": item.get("cri")}
             verified = verify_pods(identity, _load_json(args.pods), runtime_map)
             Path(args.output).write_text(json.dumps(verified, indent=2) + "\n", encoding="utf-8")
-            print(f"PASS {len(verified)} running workloads use the exact candidate image, source, and runtime version")
+            print(f"PASS {len(verified)} running workloads match the candidate OCI, node CRI, source, and runtime version")
     except (OSError, json.JSONDecodeError, ValueError, urllib.error.URLError) as error:
         print(f"FAIL native candidate identity: {error}")
         return 1
