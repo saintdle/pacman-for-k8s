@@ -1,0 +1,7 @@
+{
+  "app": {
+    "version": "0.7.18",
+    "image_manifest_list_digest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "chart": { "version": "0.7.19", "package_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" }
+}

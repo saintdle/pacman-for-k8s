@@ -1,105 +1,158 @@
-name: Promote Pac-Man image
+name: Promote Pac-Man release
 
 on:
   repository_dispatch:
     types: [pacman-chart-release]
+  schedule:
+    - cron: '29 * * * *'
   workflow_dispatch:
     inputs:
-      app_version:
-        description: Pac-Man application version
+      mode:
+        description: Reconcile verified releases, propose a rollback, or resume after review
         required: true
+        default: reconcile
+        type: choice
+        options: [reconcile, rollback, resume]
+      rollback_chart_package_ref:
+        description: Immutable chart package URL for the explicit rollback target
+        required: false
         type: string
-      chart_version:
-        description: Published Pac-Man Helm chart version
-        required: true
+      rollback_chart_package_sha256:
+        description: SHA-256 of the exact chart package asset
+        required: false
         type: string
-      image_digest:
-        description: Published multi-architecture image manifest digest
-        required: true
+      rollback_app_ref:
+        description: Immutable app record or verified legacy metadata URL
+        required: false
+        type: string
+      rollback_app_sha256:
+        description: SHA-256 of the exact app asset
+        required: false
+        type: string
+      rollback_reason:
+        description: Reason for the rollback proposal
+        required: false
         type: string
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 concurrency:
   group: pacman-k8s-promotion
   cancel-in-progress: false
 
-env:
-  IMAGE_REPOSITORY: docker.io/saintdle/pacman
-
 jobs:
   promotion:
-    name: Open Kubernetes promotion PR
+    name: Reconcile one verified promotion proposal
     runs-on: ubuntu-latest
     steps:
       - name: Check out main
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
-      - name: Read promotion payload
-        id: input
-        env:
-          DISPATCH_APP_VERSION: ${{ github.event.client_payload.app_version || '' }}
-          DISPATCH_CHART_VERSION: ${{ github.event.client_payload.chart_version || '' }}
-          DISPATCH_IMAGE_DIGEST: ${{ github.event.client_payload.image_digest || '' }}
-          MANUAL_APP_VERSION: ${{ inputs.app_version || '' }}
-          MANUAL_CHART_VERSION: ${{ inputs.chart_version || '' }}
-          MANUAL_IMAGE_DIGEST: ${{ inputs.image_digest || '' }}
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install yq
         run: |
           set -euo pipefail
-          app_version="${DISPATCH_APP_VERSION:-$MANUAL_APP_VERSION}"
-          chart_version="${DISPATCH_CHART_VERSION:-$MANUAL_CHART_VERSION}"
-          image_digest="${DISPATCH_IMAGE_DIGEST:-$MANUAL_IMAGE_DIGEST}"
-          [[ "$app_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$chart_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          curl -fsSL https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64 -o /usr/local/bin/yq
+          chmod +x /usr/local/bin/yq
+          yq --version
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Read current and pending identities
+        id: state
+        run: |
+          set -euo pipefail
+          current=pacman-promotion-state.json
+          jq -e '.kind == "pacman-k8s-promotion-state" and .app.version and .app.sha256 and .chart.version and .chart.package_sha256' "$current" >/dev/null
           {
-            echo "app_version=$app_version"
-            echo "chart_version=$chart_version"
-            echo "image_digest=$image_digest"
+            echo "app_version=$(jq -r '.app.version' "$current")"
+            echo "chart_version=$(jq -r '.chart.version' "$current")"
+            echo "image_digest=$(jq -r '.app.image_manifest_list_digest' "$current")"
+          } >> "$GITHUB_OUTPUT"
+          if git fetch --quiet origin +refs/heads/automation/pacman-promotion:refs/remotes/origin/automation/pacman-promotion 2>/dev/null; then
+            git show refs/remotes/origin/automation/pacman-promotion:pacman-promotion-state.json > /tmp/pacman-pending-state.json || true
+          fi
+
+      - name: Verify authoritative chart and app assets and plan
+        id: plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROMOTION_MODE: ${{ inputs.mode || 'reconcile' }}
+          CURRENT_STATE_PATH: pacman-promotion-state.json
+          PENDING_STATE_PATH: /tmp/pacman-pending-state.json
+          ROLLBACK_CHART_PACKAGE_REF: ${{ inputs.rollback_chart_package_ref || '' }}
+          ROLLBACK_CHART_PACKAGE_SHA256: ${{ inputs.rollback_chart_package_sha256 || '' }}
+          ROLLBACK_APP_REF: ${{ inputs.rollback_app_ref || '' }}
+          ROLLBACK_APP_SHA256: ${{ inputs.rollback_app_sha256 || '' }}
+          ROLLBACK_REASON: ${{ inputs.rollback_reason || '' }}
+        run: |
+          set -euo pipefail
+          node tools/pacman-promotion.mjs plan /tmp/pacman-promotion-plan.json
+          {
+            echo "action=$(jq -r '.action' /tmp/pacman-promotion-plan.json)"
+            echo "title=$(jq -r 'if .action == "rollback-proposal" then "chore(pacman): propose rollback to " + .app.version elif .action == "resume" then "chore(pacman): resume promotion" else "chore(pacman): promote " + .app.version end' /tmp/pacman-promotion-plan.json)"
+            echo "app_version=$(jq -r '.app.version // ""' /tmp/pacman-promotion-plan.json)"
+            echo "chart_version=$(jq -r '.chart.version // ""' /tmp/pacman-promotion-plan.json)"
+            echo "digest=$(jq -r '.app.image_manifest_list_digest // ""' /tmp/pacman-promotion-plan.json)"
+            echo "mode=$(jq -r '.action' /tmp/pacman-promotion-plan.json)"
+            echo "rollback_reason=$(jq -r '.rollback_reason // ""' /tmp/pacman-promotion-plan.json)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Update pinned image digests
+      - name: Update structured manifest pins, compatibility metadata, and docs
+        if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
         env:
-          IMAGE_DIGEST: ${{ steps.input.outputs.image_digest }}
+          PACMAN_IMAGE: docker.io/saintdle/pacman@${{ steps.plan.outputs.digest }}
+          DOC_OLD_APP_VERSION: ${{ steps.state.outputs.app_version }}
+          DOC_NEW_APP_VERSION: ${{ steps.plan.outputs.app_version }}
+          DOC_OLD_CHART_VERSION: ${{ steps.state.outputs.chart_version }}
+          DOC_NEW_CHART_VERSION: ${{ steps.plan.outputs.chart_version }}
+          DOC_OLD_IMAGE_DIGEST: ${{ steps.state.outputs.image_digest }}
+          DOC_NEW_IMAGE_DIGEST: ${{ steps.plan.outputs.digest }}
         run: |
           set -euo pipefail
-          files=$(git grep -l -E "$IMAGE_REPOSITORY@sha256:[0-9a-f]{64}" || true)
-          if [[ -z "$files" ]]; then
-            echo "No pinned Pac-Man image references found."
-            exit 0
-          fi
-          while IFS= read -r file; do
-            perl -0pi -e 's#(docker\.io/saintdle/pacman@)sha256:[0-9a-f]{64}#${1}$ENV{IMAGE_DIGEST}#g' "$file"
-          done <<< "$files"
-
-          for file in README.md cilium-demos/README.md; do
-            if [[ -f "$file" ]]; then
-              perl -0pi -e 's#sha256:[0-9a-f]+\.\.\.#$ENV{IMAGE_DIGEST}#g' "$file"
-            fi
+          mapfile -t files < <(git grep -l -E 'docker\.io/saintdle/pacman@sha256:[0-9a-f]{64}' -- '*.yaml' '*.yml')
+          [[ ${#files[@]} -gt 0 ]]
+          for file in "${files[@]}"; do
+            yq -i '(.. | select(tag == "!!map" and has("image")) | .image) |= (if test("^docker.io/saintdle/pacman@sha256:[a-f0-9]{64}$") then strenv(PACMAN_IMAGE) else . end)' "$file"
           done
+          node tools/pacman-promotion.mjs update-docs
+          node tools/pacman-promotion.mjs write-state /tmp/pacman-promotion-plan.json pacman-promotion-state.json
           git diff --check
 
-      - name: Validate changed manifests
+      - name: Validate manifests and references
+        if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
         run: |
           set -euo pipefail
           pip install yamllint
           yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: disable, comments: disable, indentation: disable}}" .
+          python3 -m unittest tests.kubeconform_schema_test
+          test -z "$(rg -l 'docker\.io/saintdle/pacman@sha256:(?!${{ steps.plan.outputs.digest }})' --pcre2 --glob '*.yaml' --glob '*.yml' . || true)"
 
-      - name: Open or update Kubernetes promotion PR
+      - name: Open or update the one promotion proposal PR
+        if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.RELEASE_AUTOMATION_TOKEN }}
-          branch: automation/pacman-${{ steps.input.outputs.app_version }}
+          branch: automation/pacman-promotion
           delete-branch: false
-          commit-message: "chore(pacman): promote image ${{ steps.input.outputs.app_version }}"
-          title: "chore(pacman): promote ${{ steps.input.outputs.app_version }}"
+          commit-message: "chore(pacman): reconcile verified release pins"
+          title: ${{ steps.plan.outputs.title }}
           body: |
-            Automated Pac-Man promotion.
+            Automated Pac-Man promotion proposal.
 
-            - Application version: `${{ steps.input.outputs.app_version }}`
-            - Helm chart version: `${{ steps.input.outputs.chart_version }}`
-            - Image digest: `${{ steps.input.outputs.image_digest }}`
+            - Mode: `${{ steps.plan.outputs.mode }}`
+            - Application version: `${{ steps.plan.outputs.app_version }}`
+            - Helm chart version: `${{ steps.plan.outputs.chart_version }}`
+            - Image digest: `${{ steps.plan.outputs.digest }}`
+            ${{ steps.plan.outputs.rollback_reason != '' && format('- Rollback reason: {0}', steps.plan.outputs.rollback_reason) || '' }}
 
-            All Kubernetes image references remain digest-pinned.
+            The workflow validates immutable release assets and proposes a coherent pin update. It does not merge or apply changes.
