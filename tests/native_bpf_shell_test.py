@@ -52,6 +52,7 @@ class NativeBpfShellTest(unittest.TestCase):
                 "  printf '%s\\n' '{\"status\":{\"nodeInfo\":{\"containerRuntimeVersion\":\"containerd://2.0.3\"}}}'\n"
                 "elif [[ \"$*\" == *'get pod '* ]]; then\n"
                 "  if [[ \"${NATIVE_BPF_FAIL_DIAGNOSTICS:-0}\" == 1 ]]; then printf '%s\\n' 'synthetic pod-state failure' >&2; exit 89; fi\n"
+                "  if [[ \"${NATIVE_BPF_HANG_POD_DIAGNOSTIC:-0}\" == 1 ]]; then exec sleep 5; fi\n"
                 "  cat <<'JSON'\n"
                 "{\"metadata\":{\"name\":\"pacman-web-abc\",\"namespace\":\"native-test\"},\"spec\":{\"containers\":[{\"name\":\"pacman\",\"env\":[{\"name\":\"DEMO_TOKEN\",\"value\":\"diagnostic-secret-marker\"}]}]},\"status\":{\"phase\":\"Running\",\"conditions\":[{\"type\":\"Ready\",\"status\":\"False\",\"reason\":\"ContainersNotReady\"}],\"containerStatuses\":[{\"name\":\"pacman\",\"ready\":false,\"restartCount\":0,\"state\":{\"waiting\":{\"reason\":\"Running\"}},\"lastState\":{}}]}}\n"
                 "JSON\n"
@@ -184,6 +185,25 @@ class NativeBpfShellTest(unittest.TestCase):
             self.assertIn("probe exit status: 1", probe_error.read_text(encoding="utf-8"))
             self.assertEqual(pod_state.read_text(encoding="utf-8").strip(), '{"available":false}')
             self.assertEqual(cleanup_marker.read_text(encoding="utf-8"), "x")
+
+            hanging_snapshot_env = failed_env.copy()
+            hanging_snapshot_env.update({
+                "NATIVE_BPF_DIAGNOSTIC_TIMEOUT_SECONDS": "1",
+                "NATIVE_BPF_HANG_POD_DIAGNOSTIC": "1",
+                "NATIVE_BPF_KIND_DELETE_MARKER": str(cleanup_marker),
+            })
+            hanging_snapshot = subprocess.run(
+                ["bash", "-c", 'source "$1"; trap cleanup EXIT; touch "$CLUSTER_ATTEMPT_MARKER"; CLUSTER_NAME=native-test; KIND_CONTEXT=kind-native-test; verify_candidate_pods native-test tetragon', "native-bpf-shell-test", str(ROOT / "tests/native-bpf.sh")],
+                env=hanging_snapshot_env,
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+            self.assertEqual(hanging_snapshot.returncode, 1, hanging_snapshot.stdout + hanging_snapshot.stderr)
+            self.assertEqual(exec_marker.read_text(encoding="utf-8"), "xxx")
+            self.assertEqual(cleanup_marker.read_text(encoding="utf-8"), "xx")
+            self.assertEqual(pod_state.read_text(encoding="utf-8").strip(), '{"available":false}')
 
 
 if __name__ == "__main__":

@@ -420,7 +420,9 @@ capture_version_probe_failure() {
     kubectl --namespace "$namespace" logs "$pod" --container pacman --timestamps=true --tail=80 2>&1 \
     | tail -c 16384 >"$app_logs_file" || true
 
-  if ! kubectl --namespace "$namespace" get pod "$pod" --output=json 2>/dev/null \
+  if ! timeout --signal=TERM --kill-after=1s "${DIAGNOSTIC_TIMEOUT_SECONDS}s" \
+    kubectl --kubeconfig "$KUBECONFIG_FILE" --context "$KIND_CONTEXT" \
+    --namespace "$namespace" get pod "$pod" --output=json 2>/dev/null \
     | jq -c '{
         name: .metadata.name,
         namespace: .metadata.namespace,
