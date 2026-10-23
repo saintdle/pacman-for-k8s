@@ -8,6 +8,7 @@ from native_bpf_candidate import (
     load_candidate,
     resolve_platform_digests,
     validate_app_release,
+    validate_chart_record,
     verify_chart_contents,
 )
 
@@ -75,8 +76,25 @@ class CandidateResolutionTest(unittest.TestCase):
 
             lock["app"]["reference"] = "https://github.com/saintdle/pacman/releases/latest/release-metadata.json"
             (root / "consumer-compatibility-lock.json").write_text(json.dumps(lock))
-            with self.assertRaisesRegex(ValueError, "immutable versioned app release record"):
+            with self.assertRaisesRegex(ValueError, "immutable GitHub release asset"):
                 load_candidate(root)
+
+    def test_lock_rejects_noncanonical_lanes_and_unknown_contract_fields(self):
+        mutations = (
+            (lambda lock: lock["supported_evidence_lanes"].append("unvalidated-enforcement"), "unsupported evidence lane"),
+            (lambda lock: lock["supported_evidence_lanes"].append("app-manifest-list"), "duplicate evidence lane"),
+            (lambda lock: lock.update(unknown_contract_field=True), "consumer compatibility lock must contain exactly"),
+            (lambda lock: lock["app"].update(unknown_contract_field=True), "lock app identity must contain exactly"),
+            (lambda lock: lock["chart"].update(unknown_contract_field=True), "lock chart identity must contain exactly"),
+        )
+        for mutate, message in mutations:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                lock = valid_lock()
+                mutate(lock)
+                (root / "consumer-compatibility-lock.json").write_text(json.dumps(lock))
+                with self.assertRaisesRegex(ValueError, message):
+                    load_candidate(root)
 
     def test_legacy_mutable_image_and_incomplete_missing_evidence_fail(self):
         state = json.loads((ROOT / "pacman-promotion-state.json").read_text(encoding="utf-8"))
@@ -111,6 +129,8 @@ class CandidateArtifactTest(unittest.TestCase):
                 {"platform": "linux/amd64", "digest": "sha256:" + "c" * 64},
                 {"platform": "linux/arm64", "digest": "sha256:" + "d" * 64},
             ],
+            "provenance_reference": "https://github.com/saintdle/pacman/actions/runs/123456",
+            "signature_reference": f"docker://{app['image_repository']}@{app['image_manifest_list_digest']}",
         }
         recorded = validate_app_release(candidate, record)
         self.assertEqual(set(recorded), {"linux/amd64", "linux/arm64"})
@@ -122,6 +142,32 @@ class CandidateArtifactTest(unittest.TestCase):
         index["manifests"][0]["digest"] = "sha256:" + "e" * 64
         with self.assertRaisesRegex(ValueError, "do not match"):
             resolve_platform_digests(index, recorded)
+        record["image"]["unknown_contract_field"] = True
+        with self.assertRaisesRegex(ValueError, "app image must contain exactly"):
+            validate_app_release(candidate, record)
+
+    def test_chart_release_record_uses_exact_nested_contract(self):
+        candidate = load_candidate(ROOT)
+        chart = candidate["chart"]
+        record = {
+            "schema_version": 1,
+            "kind": "chart-release",
+            "chart_version": chart["version"],
+            "source": {"repository": chart["source_repository"], "commit": chart["source_commit"]},
+            "package": {
+                "filename": f"pacman-{chart['version']}.tgz",
+                "sha256": chart["package_sha256"],
+                "immutable_url": chart["package_reference"],
+            },
+            "app_release": {
+                "reference": candidate["app"]["reference"],
+                "sha256": candidate["app"]["sha256"],
+            },
+        }
+        validate_chart_record(candidate, record)
+        record["package"]["unknown_contract_field"] = True
+        with self.assertRaisesRegex(ValueError, "chart package must contain exactly"):
+            validate_chart_record(candidate, record)
 
     def test_chart_package_metadata_binds_chart_app_and_image(self):
         candidate = load_candidate(ROOT)

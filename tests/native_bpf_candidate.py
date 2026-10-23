@@ -25,6 +25,10 @@ DIGEST_RE = re.compile(r"sha256:[a-f0-9]{64}\Z")
 SHA_RE = re.compile(r"[a-f0-9]{64}\Z")
 LEGACY_APP_MISSING = {"app-release-record", "platform-descriptors", "provenance", "signature"}
 LEGACY_CHART_MISSING = {"chart-release-record", "chart-source-identity"}
+SUPPORTED_EVIDENCE_LANES = {
+    "app-manifest-list", "app-platform-descriptors", "app-provenance",
+    "app-signature", "chart-package-sha256",
+}
 MAX_ASSET_BYTES = 64 * 1024 * 1024
 
 
@@ -36,6 +40,12 @@ def _require(condition: bool, message: str) -> None:
 def _obj(value: Any, name: str) -> dict[str, Any]:
     _require(isinstance(value, dict), f"{name} must be an object")
     return value
+
+
+def _exact_keys(value: Any, keys: set[str], name: str) -> dict[str, Any]:
+    obj = _obj(value, name)
+    _require(set(obj) == keys, f"{name} must contain exactly these fields: {', '.join(sorted(keys))}")
+    return obj
 
 
 def _version(value: Any, name: str) -> str:
@@ -62,11 +72,20 @@ def _digest(value: Any, name: str) -> str:
     return value
 
 
-def _asset_url(value: Any, name: str) -> str:
-    _require(isinstance(value, str), f"{name} must be an immutable HTTPS release asset")
+def _github_url(value: Any, name: str) -> urllib.parse.ParseResult:
+    _require(isinstance(value, str) and value.strip() == value, f"{name} must be a URL")
     parsed = urllib.parse.urlparse(value)
-    _require(parsed.scheme == "https" and parsed.netloc == "github.com" and not parsed.query and not parsed.fragment,
-             f"{name} must be a credential-free immutable GitHub release asset")
+    _require(parsed.scheme == "https" and parsed.hostname == "github.com"
+             and parsed.username is None and parsed.password is None
+             and not parsed.query and not parsed.fragment,
+             f"{name} must be a credential-free HTTPS GitHub URL without query or fragment")
+    return parsed
+
+
+def _asset_url(value: Any, name: str) -> str:
+    parsed = _github_url(value, name)
+    _require(len(parsed.path.split("/")) == 7 and parsed.path.split("/")[3:5] == ["releases", "download"],
+             f"{name} must identify an immutable GitHub release asset")
     return value
 
 
@@ -106,11 +125,19 @@ def load_candidate(root: Path) -> dict[str, Any]:
 
 
 def _load_lock(value: Any) -> dict[str, Any]:
-    lock = _obj(value, "consumer compatibility lock")
+    lock = _exact_keys(value, {
+        "schema_version", "kind", "app", "chart", "supported_evidence_lanes",
+    }, "consumer compatibility lock")
     _require(lock.get("schema_version") == 1 and lock.get("kind") == "consumer-compatibility-lock",
              "unsupported consumer compatibility lock")
-    app_value = _obj(lock.get("app"), "lock app")
-    chart_value = _obj(lock.get("chart"), "lock chart")
+    app_value = _exact_keys(lock.get("app"), {
+        "version", "reference", "sha256", "source_repository", "source_commit",
+        "image_repository", "image_manifest_list_digest",
+    }, "lock app identity")
+    chart_value = _exact_keys(lock.get("chart"), {
+        "version", "reference", "sha256", "package_reference", "package_sha256",
+        "source_repository", "source_commit",
+    }, "lock chart identity")
     app_version = _version(app_value.get("version"), "lock app version")
     app_reference = _asset_url(app_value.get("reference"), "lock app reference")
     app_sha = _sha(app_value.get("sha256"), "lock app checksum")
@@ -121,8 +148,13 @@ def _load_lock(value: Any) -> dict[str, Any]:
     _require(app_reference == _expected_asset(APP_REPOSITORY, f"pacman-v{app_version}", "app-release-record.json"),
              "lock app reference must identify the immutable versioned app release record")
     lanes = lock.get("supported_evidence_lanes")
-    _require(isinstance(lanes, list) and {"app-manifest-list", "app-platform-descriptors", "chart-package-sha256"}.issubset(lanes),
-             "lock does not declare manifest-list, platform-descriptor, and chart-package evidence")
+    _require(isinstance(lanes, list) and lanes, "supported_evidence_lanes must be a non-empty array")
+    seen_lanes: set[str] = set()
+    for lane in lanes:
+        _require(isinstance(lane, str) and lane in SUPPORTED_EVIDENCE_LANES,
+                 f"unsupported evidence lane: {lane}")
+        _require(lane not in seen_lanes, f"duplicate evidence lane: {lane}")
+        seen_lanes.add(lane)
 
     chart_version = _version(chart_value.get("version"), "lock chart version")
     chart_reference = _asset_url(chart_value.get("reference"), "lock chart record reference")
@@ -200,11 +232,15 @@ def validate_app_release(candidate: dict[str, Any], value: Any) -> dict[str, str
                  and record.get("commit") == app["source_commit"], "legacy app metadata does not match candidate source identity")
         return {}
 
+    _exact_keys(record, {
+        "schema_version", "kind", "app_version", "tag", "source", "image",
+        "platforms", "provenance_reference", "signature_reference",
+    }, "app release record")
     _require(record.get("schema_version") == 1 and record.get("kind") == "app-release"
              and record.get("app_version") == app["version"] and record.get("tag") == f"pacman-v{app['version']}",
              "app release record does not match candidate version")
-    source = _obj(record.get("source"), "app release source")
-    image = _obj(record.get("image"), "app release image")
+    source = _exact_keys(record.get("source"), {"repository", "commit"}, "app source")
+    image = _exact_keys(record.get("image"), {"repository", "manifest_list_digest"}, "app image")
     _require(source.get("repository") == app["source_repository"] and source.get("commit") == app["source_commit"],
              "app release record source identity does not match compatibility lock")
     _require(image.get("repository") == app["image_repository"]
@@ -213,25 +249,38 @@ def validate_app_release(candidate: dict[str, Any], value: Any) -> dict[str, str
     platforms = record.get("platforms")
     _require(isinstance(platforms, list), "app release record must contain platform descriptors")
     result: dict[str, str] = {}
+    seen_platforms: set[str] = set()
     for item in platforms:
-        item = _obj(item, "app platform descriptor")
+        item = _exact_keys(item, {"platform", "digest"}, "platform descriptor")
         platform = item.get("platform")
-        _require(isinstance(platform, str) and platform in ("linux/amd64", "linux/arm64"),
-                 "app release record contains an unsupported platform descriptor")
-        _require(platform not in result, f"app release record repeats {platform}")
-        result[platform] = _digest(item.get("digest"), f"{platform} manifest digest")
+        _require(isinstance(platform, str) and re.fullmatch(r"[a-z0-9]+/[a-z0-9]+(?:/v[0-9]+)?", platform),
+                 "platform descriptor platform must use os/architecture format")
+        _require(platform not in seen_platforms, f"app release record repeats {platform}")
+        seen_platforms.add(platform)
+        digest = _digest(item.get("digest"), f"{platform} manifest digest")
+        if platform in ("linux/amd64", "linux/arm64"):
+            result[platform] = digest
     _require(set(result) == {"linux/amd64", "linux/arm64"}, "app release record must include amd64 and arm64 descriptors")
+    provenance = _github_url(record.get("provenance_reference"), "provenance_reference")
+    run_prefix = urllib.parse.urlparse(app["source_repository"]).path + "/actions/runs/"
+    run_id = provenance.path[len(run_prefix):] if provenance.path.startswith(run_prefix) else ""
+    _require(run_id.isdigit(), "provenance_reference must identify a GitHub Actions run for the source repository")
+    expected_signature = f"docker://{app['image_repository']}@{app['image_manifest_list_digest']}"
+    _require(record.get("signature_reference") == expected_signature,
+             "signature_reference must identify the image manifest-list digest")
     return result
 
 
 def validate_chart_record(candidate: dict[str, Any], value: Any) -> None:
     chart = candidate["chart"]
-    record = _obj(value, "chart release asset")
+    record = _exact_keys(value, {
+        "schema_version", "kind", "chart_version", "source", "package", "app_release",
+    }, "chart release record")
     _require(record.get("schema_version") == 1 and record.get("kind") == "chart-release"
              and record.get("chart_version") == chart["version"], "chart release record does not match candidate version")
-    source = _obj(record.get("source"), "chart release source")
-    package = _obj(record.get("package"), "chart release package")
-    app_release = _obj(record.get("app_release"), "chart release app identity")
+    source = _exact_keys(record.get("source"), {"repository", "commit"}, "chart source")
+    package = _exact_keys(record.get("package"), {"filename", "sha256", "immutable_url"}, "chart package")
+    app_release = _exact_keys(record.get("app_release"), {"reference", "sha256"}, "chart app_release")
     _require(source.get("repository") == chart["source_repository"] and source.get("commit") == chart["source_commit"],
              "chart release record source identity does not match compatibility lock")
     _require(package.get("filename") == f"pacman-{chart['version']}.tgz"

@@ -406,7 +406,8 @@ EOF
 VERSION_PROBE='fetch("http://127.0.0.1:8080/version").then(async response => { if (!response.ok) throw new Error(`/version returned ${response.status}`); console.log(JSON.stringify(await response.json())); }).catch(error => { console.error(error.message); process.exitCode = 1; });'
 
 verify_candidate_pods() {
-  local namespace="$1" name="$2" pods_file="$EVIDENCE_DIR/${name}-pods.json"
+  local namespace="$1" name="$2"
+  local pods_file="$EVIDENCE_DIR/${name}-pods.json"
   local runtime_file="$EVIDENCE_DIR/${name}-runtime.jsonl" pod_rows pod role runtime_file_one
   kubectl --namespace "$namespace" get pods \
     --selector app.kubernetes.io/part-of=pacman-cilium-demo --output=json >"$pods_file"
