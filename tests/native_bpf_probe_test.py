@@ -35,6 +35,7 @@ class NativeBpfHttpProbeTest(unittest.TestCase):
         (self.pod_bin / "node").symlink_to(node)
 
         self.request_log = self.root / "requests.jsonl"
+        self.kubectl_call_log = self.root / "kubectl-calls.txt"
         self.fetch_stub = self.root / "mock-fetch.cjs"
         self.fetch_stub.write_text(
             """const fs = require('node:fs');
@@ -67,6 +68,7 @@ globalThis.fetch = async (input, options = {}) => {
             + """import os
 import subprocess
 import sys
+import time
 
 arguments = sys.argv[1:]
 try:
@@ -81,11 +83,31 @@ pod_env = {
     "NATIVE_BPF_TEST_STAGE": os.environ["NATIVE_BPF_TEST_STAGE"],
     "NATIVE_BPF_REQUEST_LOG": os.environ["NATIVE_BPF_REQUEST_LOG"],
 }
+stage = os.environ["NATIVE_BPF_TEST_STAGE"]
+with open(os.environ["NATIVE_BPF_KUBECTL_CALL_LOG"], "a", encoding="utf-8") as call_log:
+    call_log.write(stage + "\\n")
+failure_marker = os.environ.get("NATIVE_BPF_TEST_FAIL_ONCE_MARKER")
+if failure_marker and not os.path.exists(failure_marker):
+    with open(failure_marker, "w", encoding="utf-8") as marker:
+        marker.write("failed once\\n")
+    print("synthetic first kubectl exec failure", file=sys.stderr)
+    raise SystemExit(91)
 try:
-    result = subprocess.run(command, env=pod_env, capture_output=True, text=True, check=False)
+    result = subprocess.run(
+        command, env=pod_env, capture_output=True, text=True, check=False,
+    )
 except FileNotFoundError as error:
     print(f"pod exec could not find {error.filename!r} on PATH", file=sys.stderr)
     raise SystemExit(127)
+delay_marker = os.environ.get("NATIVE_BPF_TEST_POST_NODE_DELAY_MARKER")
+delay_seconds = float(os.environ.get("NATIVE_BPF_TEST_POST_NODE_DELAY_SECONDS", "0"))
+if (
+    result.returncode == 0 and delay_marker and stage == "baseline"
+    and not os.path.exists(delay_marker)
+):
+    with open(delay_marker, "w", encoding="utf-8") as marker:
+        marker.write("delayed once\\n")
+    time.sleep(delay_seconds)
 sys.stdout.write(result.stdout)
 sys.stderr.write(result.stderr)
 raise SystemExit(result.returncode)
@@ -103,48 +125,89 @@ raise SystemExit(result.returncode)
             "NATIVE_BPF_POD_BIN": str(self.pod_bin),
             "NATIVE_BPF_NODE_OPTIONS": f"--require={self.fetch_stub}",
             "NATIVE_BPF_REQUEST_LOG": str(self.request_log),
+            "NATIVE_BPF_KUBECTL_CALL_LOG": str(self.kubectl_call_log),
             "NATIVE_BPF_TEST_STAGE": "baseline",
             "NATIVE_BPF_COMMAND_KILL_GRACE_SECONDS": "1",
-            "NATIVE_BPF_KUBECTL_TIMEOUT_SECONDS": "2",
+            "NATIVE_BPF_KUBECTL_TIMEOUT_SECONDS": "15",
         }
 
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_run_http_probe_executes_node_without_env_and_propagates_run_tag(self):
+    def _run_probe_stages(self, stages, env):
         script = (
             f"source {shlex.quote(str(RUNNER))}\n"
             'WEB_POD="mock-web-pod"\n'
             # Keep the harness's bounded retry loop fast when the old command fails.
             "sleep() { :; }\n"
             "export NATIVE_BPF_TEST_STAGE\n"
-            "for NATIVE_BPF_TEST_STAGE in baseline active recovery; do\n"
-            '  run_http_probe "$NATIVE_BPF_TEST_STAGE"\n'
-            "done\n"
+            'for NATIVE_BPF_TEST_STAGE in "$@"; do run_http_probe "$NATIVE_BPF_TEST_STAGE"; done\n'
         )
-        result = subprocess.run(
-            ["bash", "-c", script],
-            env=self.env,
+        return subprocess.run(
+            ["bash", "-c", script, "native-bpf-probe-test", *stages],
+            env=env,
             capture_output=True,
             text=True,
-            timeout=20,
+            timeout=60,
             check=False,
         )
-        self.assertEqual(
-            result.returncode,
-            0,
-            f"run_http_probe failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}",
-        )
 
-        records = [
+    def _records(self):
+        if not self.request_log.exists():
+            return []
+        return [
             json.loads(line)
             for line in self.request_log.read_text(encoding="utf-8").splitlines()
         ]
-        self.assertEqual(len(records), 5 * len(STAGES))
+
+    def _failure_details(self, result, stages):
+        records = self._records()
+        calls = (
+            self.kubectl_call_log.read_text(encoding="utf-8").splitlines()
+            if self.kubectl_call_log.exists()
+            else []
+        )
+        details = [
+            f"returncode={result.returncode}",
+            f"stdout:\n{result.stdout}",
+            f"stderr:\n{result.stderr}",
+            f"request_counts={Counter(record['stage'] for record in records)}",
+            f"kubectl_calls={Counter(calls)}",
+        ]
+        evidence_dir = self.root / "evidence"
+        for stage in stages:
+            for label, path in (
+                ("result", evidence_dir / f"http-{stage}.json"),
+                ("last-check", evidence_dir / f"http-{stage}-last-check.txt"),
+                ("last-error", evidence_dir / f"http-{stage}-last-error.txt"),
+            ):
+                if path.is_file():
+                    details.append(f"{stage} {label}:\n{path.read_text(encoding='utf-8')}")
+        return "\n".join(details)
+
+    def test_run_http_probe_executes_node_without_env_and_propagates_run_tag(self):
+        delayed_env = self.env.copy()
+        delayed_env.update({
+            "NATIVE_BPF_TEST_POST_NODE_DELAY_SECONDS": "3",
+            "NATIVE_BPF_TEST_POST_NODE_DELAY_MARKER": str(self.root / "post-node-delay-once"),
+        })
+        result = self._run_probe_stages(STAGES, delayed_env)
+        self.assertEqual(
+            result.returncode,
+            0,
+            self._failure_details(result, STAGES),
+        )
+
+        records = self._records()
+        self.assertEqual(len(records), 5 * len(STAGES), self._failure_details(result, STAGES))
         for stage in STAGES:
             with self.subTest(stage=stage):
                 names = Counter(record["name"] for record in records if record["stage"] == stage)
-                self.assertEqual(names, Counter({EXPECTED_NAME: 5}))
+                self.assertEqual(
+                    names,
+                    Counter({EXPECTED_NAME: 5}),
+                    self._failure_details(result, STAGES),
+                )
 
         policy_text = POLICY.read_text(encoding="utf-8")
         user_marker = "        app.kubernetes.io/component: user\n"
@@ -178,6 +241,20 @@ raise SystemExit(result.returncode)
         ):
             with self.subTest(denied_target=denied_target):
                 self.assertIsNone(re.fullmatch(session_rule, denied_target))
+
+    def test_run_http_probe_retries_one_controlled_exec_failure(self):
+        retry_env = self.env.copy()
+        retry_env["NATIVE_BPF_TEST_FAIL_ONCE_MARKER"] = str(self.root / "exec-failure-once")
+        result = self._run_probe_stages(("baseline",), retry_env)
+        self.assertEqual(result.returncode, 0, self._failure_details(result, ("baseline",)))
+        self.assertEqual(
+            self.kubectl_call_log.read_text(encoding="utf-8").splitlines(),
+            ["baseline", "baseline"],
+            self._failure_details(result, ("baseline",)),
+        )
+        records = self._records()
+        self.assertEqual(len(records), 5, self._failure_details(result, ("baseline",)))
+        self.assertEqual(Counter(record["name"] for record in records), Counter({EXPECTED_NAME: 5}))
 
 
 if __name__ == "__main__":
