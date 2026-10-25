@@ -27,6 +27,18 @@ const managedImageManifestPaths = [
 const managedImageTextPaths = ['README.md', 'cilium-demos/README.md', 'cilium-demos/scripts/deploy-demo.sh'];
 export const MANAGED_IMAGE_REFERENCE_PATHS = [...managedImageManifestPaths, ...managedImageTextPaths];
 export const MANAGED_VERSION_REFERENCE_PATHS = ['README.md', 'cilium-demos/fault-demo/README.md'];
+export const MANAGED_IMAGE_CONTAINER_COUNTS = {
+  'deployments/pacman-deployment.yaml': 3,
+  'cilium-demos/canary-progressive-delivery/canary.yaml': 2,
+  'cilium-demos/cluster-mesh-failover/clustermesh-demo.yaml': 1,
+  'cilium-demos/fault-injection-resilience/fault-demo.yaml': 1,
+  'cilium-demos/grpc-grpcroute/grpcroute.yaml': 1,
+  'cilium-demos/load-simulation/node-user-simulator.yaml': 1,
+  'cilium-demos/microservices-east-west/workloads.yaml': 3,
+  'cilium-demos/runtime-security-incident/incident-demo.yaml': 1,
+  'cilium-demos/tetragon-enforcement/tetragon-demo.yaml': 1,
+  'cilium-demos/topology-aware-routing/topology-demo.yaml': 1,
+};
 
 function fail(message) { throw new Error(message); }
 function version(value, name = 'version') {
@@ -301,8 +313,11 @@ export function assertManagedConsumerReferences({ state, compatibilityLock = nul
   const imagePaths = [...managedImageManifestPaths, ...managedImageTextPaths];
   for (const path of imagePaths) if (!files.has(path)) fail(`${path} is a required managed image surface`);
   for (const path of managedImageManifestPaths) {
-    const images = [...files.get(path).matchAll(/^\s*image:\s*(\S+)\s*$/gm)].map(([, image]) => image);
-    if (!images.length) fail(`${path} has no managed workload image`);
+    const encodedImages = execFileSync('yq', ['eval-all', '-o=json', '[.. | select(tag == "!!map" and has("containers")) | .containers[].image]', '-'], {
+      input: files.get(path), encoding: 'utf8',
+    });
+    const images = JSON.parse(encodedImages);
+    if (images.length !== MANAGED_IMAGE_CONTAINER_COUNTS[path]) fail(`${path} must contain ${MANAGED_IMAGE_CONTAINER_COUNTS[path]} Pac-Man containers; found ${images.length}`);
     for (const image of images) if (image !== expectedImage) fail(`${path} image ${image} does not match compatibility state ${expectedImage}`);
   }
   const imageTextChecks = [

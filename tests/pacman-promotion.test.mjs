@@ -5,7 +5,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { assertManagedConsumerReferences, MANAGED_IMAGE_REFERENCE_PATHS, MANAGED_VERSION_REFERENCE_PATHS, planConsumerPromotion, rollbackRequiresExplicitResume, validateAppReleaseMetadata } from '../tools/pacman-promotion.mjs';
+import { assertManagedConsumerReferences, MANAGED_IMAGE_CONTAINER_COUNTS, MANAGED_IMAGE_REFERENCE_PATHS, MANAGED_VERSION_REFERENCE_PATHS, planConsumerPromotion, rollbackRequiresExplicitResume, validateAppReleaseMetadata } from '../tools/pacman-promotion.mjs';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/promotion/${name}`, import.meta.url), 'utf8'));
 const initialState = JSON.parse(readFileSync(new URL('../pacman-promotion-state.json', import.meta.url), 'utf8'));
@@ -52,7 +52,8 @@ function managedReferences(state) {
     if (path === 'cilium-demos/README.md') return { path, content: `Default image: \`${image}\`.\n` };
     if (path === 'cilium-demos/scripts/deploy-demo.sh') return { path, content: `PACMAN_IMAGE="\${PACMAN_IMAGE:-${image}}"\n` };
     if (path === 'cilium-demos/fault-demo/README.md') return { path, content: `published Pac-Man chart \`${state.chart.version}\` from https://github.com/saintdle/helm-charts/releases/tag/pacman-${state.chart.version})\nexport CHART_VERSION=${state.chart.version}\n` };
-    return { path, content: `apiVersion: v1\nspec:\n  containers:\n    - name: pacman\n      image: ${image}\n` };
+    const containers = Array.from({ length: MANAGED_IMAGE_CONTAINER_COUNTS[path] }, () => `    - name: pacman\n      image: ${image}`).join('\n');
+    return { path, content: `apiVersion: v1\nspec:\n  containers:\n${containers}\n` };
   });
 }
 
@@ -73,11 +74,27 @@ test('legacy state accepts matching references and rejects one stale generic ima
   const references = managedReferences(initialState);
   assert.equal(assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references }), currentImage);
   const drifted = references.map((reference) => ({ ...reference }));
-  drifted.find((reference) => reference.path === 'deployments/pacman-deployment.yaml').content = `image: docker.io/saintdle/pacman@sha256:${'a'.repeat(64)}`;
+  const driftedReference = drifted.find((reference) => reference.path === 'deployments/pacman-deployment.yaml');
+  driftedReference.content = driftedReference.content.replace(currentImage, `docker.io/saintdle/pacman@sha256:${'a'.repeat(64)}`);
   assert.throws(() => assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references: drifted }), /deployments\/pacman-deployment.yaml.*does not match compatibility state/);
   const mutable = references.map((reference) => ({ ...reference }));
-  mutable.find((reference) => reference.path === 'deployments/pacman-deployment.yaml').content = 'image: docker.io/saintdle/pacman:latest';
+  const mutableReference = mutable.find((reference) => reference.path === 'deployments/pacman-deployment.yaml');
+  mutableReference.content = mutableReference.content.replace(currentImage, 'docker.io/saintdle/pacman:latest');
   assert.throws(() => assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references: mutable }), /deployments\/pacman-deployment.yaml.*does not match compatibility state/);
+  const spacedKey = references.map((reference) => ({ ...reference }));
+  const spacedReference = spacedKey.find((reference) => reference.path === 'cilium-demos/microservices-east-west/workloads.yaml');
+  spacedReference.content = spacedReference.content.replace(`image: ${currentImage}`, 'image : docker.io/saintdle/pacman:latest');
+  assert.throws(() => assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references: spacedKey }), /microservices-east-west\/workloads.yaml.*does not match compatibility state/);
+  const quotedKey = references.map((reference) => ({ ...reference }));
+  const quotedReference = quotedKey.find((reference) => reference.path === 'cilium-demos/microservices-east-west/workloads.yaml');
+  quotedReference.content = quotedReference.content.replace(`image: ${currentImage}`, `"image": ${currentImage}`);
+  assert.equal(assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references: quotedKey }), currentImage);
+  const missingImage = references.map((reference) => ({ ...reference }));
+  const missingReference = missingImage.find((reference) => reference.path === 'deployments/pacman-deployment.yaml');
+  const missingLines = missingReference.content.split('\n');
+  missingLines.splice(missingLines.findIndex((line) => line.trimStart().startsWith('image:')), 1);
+  missingReference.content = missingLines.join('\n');
+  assert.throws(() => assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references: missingImage }), /deployments\/pacman-deployment.yaml.*must contain 3 Pac-Man containers; found 2/);
 });
 
 test('future compatibility locks are checked against both synthetic typed identities', () => {
@@ -155,6 +172,11 @@ test('promotion writes one coherent synthetic state and lock consumed by the pro
     const mutable = spawnSync(process.execPath, [promotionCli, 'check-references', statePath, join(directory, 'consumer-compatibility-lock.json')], { cwd: directory, encoding: 'utf8' });
     assert.notEqual(mutable.status, 0);
     assert.match(mutable.stderr, /deployments\/pacman-deployment\.yaml.*does not match compatibility state/);
+    writeFileSync(manifestPath, matchingManifest);
+    writeFileSync(manifestPath, matchingManifest.replace('image:', 'image :').replace(new RegExp(`${state.app.image_repository.replaceAll('.', '\\.')}@${state.app.image_manifest_list_digest}`), 'docker.io/saintdle/pacman:latest'));
+    const spacedKey = spawnSync(process.execPath, [promotionCli, 'check-references', statePath, join(directory, 'consumer-compatibility-lock.json')], { cwd: directory, encoding: 'utf8' });
+    assert.notEqual(spacedKey.status, 0);
+    assert.match(spacedKey.stderr, /deployments\/pacman-deployment\.yaml.*does not match compatibility state/);
     writeFileSync(manifestPath, matchingManifest);
     const restored = spawnSync(process.execPath, [promotionCli, 'check-references', statePath, join(directory, 'consumer-compatibility-lock.json')], { cwd: directory, encoding: 'utf8' });
     assert.equal(restored.status, 0, restored.stderr);
