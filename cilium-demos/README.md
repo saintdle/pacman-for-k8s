@@ -61,7 +61,9 @@ created an isolated Kind cluster on a native amd64 runner, applied the checked-i
 east-west workloads and policy, and verified allow, explicit L7-deny, and
 policy-removal recovery behavior. It also loaded the observe-only Tetragon
 policy and verified file-open and child-process events correlated to the demo
-pod. The workflow is not a required pull-request check.
+pod. Every pull request reports `native-amd64`; relevant changes run the
+native runtime scenario, and unrelated changes return an explicit no-op.
+Manual and nightly runs retain full scenario coverage.
 
 That run does not demonstrate Tetragon enforcement, all ten manual fault-demo
 scenarios, or external LoadBalancer/provider behavior. The enforcement steps
