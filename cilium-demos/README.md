@@ -48,18 +48,22 @@ The east-west demo defaults to `pacman-east-west`; other demos keep the
 The wrapper checks for persistent base resources and conflicting role ownership
 before any namespace or workload change. Do not target the persistent base
 namespace: the demo score/user roles use memory and do not preserve game data.
-The Helm scenarios have their own app/chart prerequisites; the default image above does not include all of their features.
+The released default image above contains the gated fault and synthetic probe
+runtime used by the chart. The ten scenarios in
+[`fault-demo`](fault-demo/README.md) are human-run teaching steps and have not
+been validated as a complete live walkthrough. They are distinct from the
+native workflow evidence below.
 
 ## Native BPF integration workflow
 
-`.github/workflows/native-bpf.yml` runs manually or nightly on a native Ubuntu
-amd64 runner. It creates an isolated Kind cluster, applies the checked-in
-east-west workloads and policy, and verifies allow, explicit L7-deny, and
-policy-removal recovery behavior. It then installs the checked-in observe-only
-Tetragon policy and requires correlated file-open and child-process events from
-the demo pod. The workflow is not a required pull-request check. Manual and
-scheduled runs become available after the workflow reaches the default branch.
+The public [native workflow run](https://github.com/saintdle/pacman-for-k8s/actions/runs/40221882676)
+created an isolated Kind cluster on a native amd64 runner, applied the checked-in
+east-west workloads and policy, and verified allow, explicit L7-deny, and
+policy-removal recovery behavior. It also loaded the observe-only Tetragon
+policy and verified file-open and child-process events correlated to the demo
+pod. The workflow is not a required pull-request check.
 
-Static checks cannot prove that kernel BPF hooks ran; Cilium and Tetragon runtime
-behavior remains unverified until a native hosted workflow run passes. The
-Tetragon policy only observes events and does not enforce actions.
+That run does not demonstrate Tetragon enforcement, all ten manual fault-demo
+scenarios, or external LoadBalancer/provider behavior. The enforcement steps
+remain exploratory and require a compatible native kernel; policy rendering or
+loading alone is not proof that an action was enforced.

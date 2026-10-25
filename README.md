@@ -7,8 +7,13 @@ example with a migration `Job`, Cilium L7 example, Prometheus and Tetragon
 overlays) see
 [`saintdle/pacman/k8s/examples`](https://github.com/saintdle/pacman/tree/master/k8s/examples).
 
-This repo layers on persistent storage, Pod Security Standards, install
-scripts, and a catalogue of Cilium demos.
+This repository owns the Kubernetes platform surface: persistent storage,
+Pod Security Standards, install scripts, and Cilium/Tetragon scenarios. Its raw
+manifests and Kustomize examples are intentional teaching consumers that keep
+resource names and lifecycle steps visible; they are not alternate Helm chart
+sources. `saintdle/pacman` maintains the app and editable chart source, while
+`saintdle/helm-charts` distributes versioned packages through the stable
+<https://saintdle.github.io/helm-charts> repository.
 
 <img src="https://veducate.co.uk/wp-content/uploads/2021/09/Pac-Man-UI.jpg" width="45%" height="45%">
 
@@ -28,8 +33,10 @@ scripts, and a catalogue of Cilium demos.
 
 The raw manifests use app `0.7.16`, matching chart `0.7.17`, with all three
 roles pinned to `docker.io/saintdle/pacman@sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf`.
-Promotion updates retain the shared image pin. The Cilium demo wrapper
-accepts a `PACMAN_IMAGE` override.
+The released image includes the opt-in fault and synthetic security-probe
+runtime; the chart keeps these controls disabled by default. Promotion updates
+retain the shared image pin. The Cilium demo wrapper accepts a `PACMAN_IMAGE`
+override.
 
 ## Install (base mongo-backed deployment)
 

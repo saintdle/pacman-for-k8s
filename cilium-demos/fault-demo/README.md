@@ -22,21 +22,25 @@ restore the baseline. There is no scenario runner.
 Install Git, Docker, kind, kubectl, Helm, the Cilium and Hubble CLIs, curl, and
 OpenSSL. Run commands from the root of this repository, in Bash.
 
-These examples need the fault controls from
-[saintdle/pacman#20](https://github.com/saintdle/pacman/pull/20) and the
-published Pac-Man chart `0.7.17` from
-[saintdle/helm-charts](https://github.com/saintdle/helm-charts/releases/tag/pacman-0.7.17).
-The commands below build the app image from a reviewed public source revision
-and pull the released chart; they do not assume a pre-existing candidate image.
+The released app image `0.7.16` contains the gated fault and synthetic
+security-probe runtime. The published Pac-Man chart `0.7.17` from the
+[versioned chart release](https://github.com/saintdle/helm-charts/releases/tag/pacman-0.7.17)
+exposes its opt-in controls. The commands below build a local Kind image from
+the exact app release source and pull the versioned chart. This local rebuild is for the walkthrough's
+`pullPolicy: Never`; it does not reproduce the published image digest or
+attestations. The stable public chart repository remains
+<https://saintdle.github.io/helm-charts>.
 
 The Tetragon enforcement scenarios also need a supported native Linux kernel
 with BTF and `CONFIG_BPF_KPROBE_OVERRIDE=y`. kind uses the container host's
 kernel (the Linux VM kernel on Docker Desktop). Emulated containers do not
 validate another architecture's BPF support. Stop if the policy cannot load.
 
-This walkthrough has static command/YAML and Helm-render validation only.
-Live cluster behavior and native BPF enforcement have not been revalidated
-for these manual steps.
+The public [native runtime run](https://github.com/saintdle/pacman-for-k8s/actions/runs/40221882676)
+verified Cilium allow/deny/policy-removal recovery and the loaded observe-only
+Tetragon policy with correlated file and exec events. It did not run this
+ten-scenario walkthrough. The manual scenarios, Tetragon enforcement, and
+external LoadBalancer/provider behavior remain unvalidated by that evidence.
 
 ## Prepare the lab
 
@@ -51,8 +55,8 @@ export NAMESPACE=pacman-fault-demo
 export DEMO_DIR="$PWD/cilium-demos/fault-demo"
 LAB_DIR="$(mktemp -d)"
 export LAB_DIR
-export APP_REVISION=991ba38517da6339e66b0c6b1b088b17d59fdfd0
-export APP_IMAGE=pacman-manual-demo:991ba385
+export APP_REVISION=13f04d6e6aea62f1d32d57d90e4eff786083c02e
+export APP_IMAGE=pacman-manual-demo:13f04d6e
 export CHART_VERSION=0.7.17
 
 git clone https://github.com/saintdle/pacman.git "$LAB_DIR/app"
