@@ -5,7 +5,7 @@ Extended deployment surface for the Pac-Man app maintained at
 in-repo set of learning examples (a multi-role `Deployment`, a postgres
 example with a migration `Job`, Cilium L7 example, Prometheus and Tetragon
 overlays) see
-[`saintdle/pacman/k8s/examples`](https://github.com/saintdle/pacman/tree/master/k8s/examples).
+[`saintdle/pacman/k8s/examples`](https://github.com/saintdle/pacman/tree/main/k8s/examples).
 
 This repository owns the Kubernetes platform surface: persistent storage,
 Pod Security Standards, install scripts, and Cilium/Tetragon scenarios. Its raw
