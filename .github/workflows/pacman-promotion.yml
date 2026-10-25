@@ -145,6 +145,8 @@ jobs:
         if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
           pip install yamllint
           yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: disable, comments: disable, indentation: disable}}" .
           python3 -m unittest tests.kubeconform_schema_test
