@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { planConsumerPromotion, rollbackRequiresExplicitResume, validateAppReleaseMetadata } from '../tools/pacman-promotion.mjs';
+import { assertManagedConsumerReferences, MANAGED_IMAGE_REFERENCE_PATHS, MANAGED_VERSION_REFERENCE_PATHS, planConsumerPromotion, rollbackRequiresExplicitResume, validateAppReleaseMetadata } from '../tools/pacman-promotion.mjs';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/promotion/${name}`, import.meta.url), 'utf8'));
 const initialState = JSON.parse(readFileSync(new URL('../pacman-promotion-state.json', import.meta.url), 'utf8'));
@@ -13,6 +13,48 @@ const promotionCli = fileURLToPath(new URL('../tools/pacman-promotion.mjs', impo
 const promotionWorkflow = fileURLToPath(new URL('../.github/workflows/pacman-promotion.yml', import.meta.url));
 const current = fixture('current.json');
 const newer = fixture('newer.json');
+
+function syntheticTypedState() {
+  const state = structuredClone(initialState);
+  state.app.format = 'app-release-v1';
+  state.app.reference = 'https://github.com/saintdle/pacman/releases/download/pacman-v0.7.16/app-release-record.json';
+  state.app.sha256 = '1'.repeat(64);
+  delete state.app.missing_evidence;
+  state.chart.format = 'chart-release-v1';
+  state.chart.reference = 'https://github.com/saintdle/helm-charts/releases/download/helm-chart-v0.7.17/chart-release-record.json';
+  state.chart.sha256 = '2'.repeat(64);
+  delete state.chart.missing_evidence;
+  return state;
+}
+
+function syntheticCompatibilityLock(state) {
+  return {
+    schema_version: 1,
+    kind: 'consumer-compatibility-lock',
+    app: {
+      version: state.app.version, reference: state.app.reference, sha256: state.app.sha256,
+      source_repository: state.app.source_repository, source_commit: state.app.source_commit,
+      image_repository: state.app.image_repository, image_manifest_list_digest: state.app.image_manifest_list_digest,
+    },
+    chart: {
+      version: state.chart.version, reference: state.chart.reference, sha256: state.chart.sha256,
+      package_reference: state.chart.package_reference, package_sha256: state.chart.package_sha256,
+      source_repository: state.chart.source_repository, source_commit: state.chart.source_commit,
+    },
+    supported_evidence_lanes: ['app-manifest-list', 'app-platform-descriptors', 'app-provenance', 'app-signature', 'chart-package-sha256'],
+  };
+}
+
+function managedReferences(state) {
+  const image = `${state.app.image_repository}@${state.app.image_manifest_list_digest}`;
+  return [...MANAGED_IMAGE_REFERENCE_PATHS, ...MANAGED_VERSION_REFERENCE_PATHS].map((path) => {
+    if (path === 'README.md') return { path, content: `The raw manifests use app \`${state.app.version}\`, matching chart \`${state.chart.version}\`, with roles pinned to \`${image}\`. Use \`--version ${state.chart.version}\` to reproduce the app/chart pair above.` };
+    if (path === 'cilium-demos/README.md') return { path, content: `Default image: \`${image}\`.\n` };
+    if (path === 'cilium-demos/scripts/deploy-demo.sh') return { path, content: `PACMAN_IMAGE="\${PACMAN_IMAGE:-${image}}"\n` };
+    if (path === 'cilium-demos/fault-demo/README.md') return { path, content: `published Pac-Man chart \`${state.chart.version}\` from https://github.com/saintdle/helm-charts/releases/tag/pacman-${state.chart.version})\nexport CHART_VERSION=${state.chart.version}\n` };
+    return { path, content: `apiVersion: v1\nspec:\n  containers:\n    - name: pacman\n      image: ${image}\n` };
+  });
+}
 
 test('tracked initial state matches current immutable public app, chart, and image pins', () => {
   assert.equal(initialState.kind, 'pacman-k8s-promotion-state');
@@ -24,6 +66,108 @@ test('tracked initial state matches current immutable public app, chart, and ima
   assert.equal(initialState.chart.package_sha256, 'b0722ab17320afe14d5bee5ebf25ed26c9dcfa59f24e238764c4b2d8a76eb971');
   assert.deepEqual(planConsumerPromotion({ current: initialState, candidate: initialState }), { action: 'noop', reason: 'already-promoted' });
   assert.deepEqual(initialState.app.missing_evidence, ['app-release-record', 'platform-descriptors', 'provenance', 'signature']);
+});
+
+test('legacy state accepts matching references and rejects one stale generic image pin', () => {
+  const currentImage = `${initialState.app.image_repository}@${initialState.app.image_manifest_list_digest}`;
+  const references = managedReferences(initialState);
+  assert.equal(assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references }), currentImage);
+  const drifted = references.map((reference) => ({ ...reference }));
+  drifted.find((reference) => reference.path === 'deployments/pacman-deployment.yaml').content = `image: docker.io/saintdle/pacman@sha256:${'a'.repeat(64)}`;
+  assert.throws(() => assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references: drifted }), /deployments\/pacman-deployment.yaml.*does not match compatibility state/);
+  const mutable = references.map((reference) => ({ ...reference }));
+  mutable.find((reference) => reference.path === 'deployments/pacman-deployment.yaml').content = 'image: docker.io/saintdle/pacman:latest';
+  assert.throws(() => assertManagedConsumerReferences({ state: initialState, compatibilityLock: null, references: mutable }), /deployments\/pacman-deployment.yaml.*does not match compatibility state/);
+});
+
+test('future compatibility locks are checked against both synthetic typed identities', () => {
+  const state = syntheticTypedState();
+  const compatibilityLock = syntheticCompatibilityLock(state);
+  const references = managedReferences(state);
+  assert.equal(assertManagedConsumerReferences({ state, compatibilityLock, references }), `${state.app.image_repository}@${state.app.image_manifest_list_digest}`);
+  assert.throws(() => assertManagedConsumerReferences({ state, compatibilityLock: { ...compatibilityLock, chart: { ...compatibilityLock.chart, version: '9.9.9' } }, references }), /compatibility lock does not match promotion state/);
+});
+
+test('promotion state, lock, and references move together when either identity axis changes', () => {
+  const syntheticState = syntheticTypedState();
+  const originalLock = syntheticCompatibilityLock(syntheticState);
+  const cases = [
+    (state) => {
+      state.app.version = '0.7.18';
+      state.app.reference = 'https://github.com/saintdle/pacman/releases/download/pacman-v0.7.18/app-release-record.json';
+      state.app.sha256 = 'a'.repeat(64);
+      state.app.source_commit = 'b'.repeat(40);
+      state.app.image_manifest_list_digest = `sha256:${'c'.repeat(64)}`;
+    },
+    (state) => {
+      state.chart.version = '0.7.18';
+      state.chart.reference = 'https://github.com/saintdle/helm-charts/releases/download/helm-chart-v0.7.18/chart-release-record.json';
+      state.chart.sha256 = 'd'.repeat(64);
+      state.chart.package_reference = 'https://github.com/saintdle/helm-charts/releases/download/helm-chart-v0.7.18/pacman-0.7.18.tgz';
+      state.chart.package_sha256 = 'e'.repeat(64);
+      state.chart.source_commit = 'f'.repeat(40);
+    },
+  ];
+  for (const changeAxis of cases) {
+    const state = structuredClone(syntheticState);
+    changeAxis(state);
+    const currentLock = syntheticCompatibilityLock(state);
+    const references = managedReferences(state);
+    assert.equal(assertManagedConsumerReferences({ state, compatibilityLock: currentLock, references }), `${state.app.image_repository}@${state.app.image_manifest_list_digest}`);
+    assert.throws(() => assertManagedConsumerReferences({ state, compatibilityLock: originalLock, references }), /compatibility lock does not match promotion state/);
+  }
+});
+
+test('promotion writes one coherent synthetic state and lock consumed by the production checker', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pacman-coherent-consumer-promotion-'));
+  try {
+    execFileSync('git', ['init', '-q'], { cwd: directory });
+    const state = syntheticTypedState();
+    state.app.version = '0.7.18';
+    state.app.reference = 'https://github.com/saintdle/pacman/releases/download/pacman-v0.7.18/app-release-record.json';
+    state.app.sha256 = '3'.repeat(64);
+    state.app.source_commit = '4'.repeat(40);
+    state.app.image_manifest_list_digest = `sha256:${'5'.repeat(64)}`;
+    state.chart.version = '0.7.18';
+    state.chart.reference = 'https://github.com/saintdle/helm-charts/releases/download/helm-chart-v0.7.18/chart-release-record.json';
+    state.chart.sha256 = '6'.repeat(64);
+    state.chart.package_reference = 'https://github.com/saintdle/helm-charts/releases/download/helm-chart-v0.7.18/pacman-0.7.18.tgz';
+    state.chart.package_sha256 = '7'.repeat(64);
+    state.chart.source_commit = '8'.repeat(40);
+    for (const reference of managedReferences(state)) {
+      const path = join(directory, reference.path);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, reference.content);
+    }
+    const planPath = join(directory, 'plan.json');
+    const statePath = join(directory, 'pacman-promotion-state.json');
+    writeFileSync(planPath, JSON.stringify({ action: 'promotion', app: state.app, chart: state.chart, compatibility_lock: syntheticCompatibilityLock(state) }));
+    const written = spawnSync(process.execPath, [promotionCli, 'write-state', planPath, statePath], { cwd: directory, encoding: 'utf8' });
+    assert.equal(written.status, 0, written.stderr);
+    execFileSync('git', ['add', ...MANAGED_IMAGE_REFERENCE_PATHS, ...MANAGED_VERSION_REFERENCE_PATHS], { cwd: directory });
+    const check = spawnSync(process.execPath, [promotionCli, 'check-references', statePath, join(directory, 'consumer-compatibility-lock.json')], { cwd: directory, encoding: 'utf8' });
+    assert.equal(check.status, 0, check.stderr);
+    assert.deepEqual(JSON.parse(readFileSync(statePath, 'utf8')).app, state.app);
+    assert.deepEqual(JSON.parse(readFileSync(join(directory, 'consumer-compatibility-lock.json'), 'utf8')), syntheticCompatibilityLock(state));
+    const manifestPath = join(directory, 'deployments/pacman-deployment.yaml');
+    const matchingManifest = readFileSync(manifestPath, 'utf8');
+    writeFileSync(manifestPath, matchingManifest.replace(new RegExp(`${state.app.image_repository.replaceAll('.', '\\.')}@${state.app.image_manifest_list_digest}`), 'docker.io/saintdle/pacman:latest'));
+    const mutable = spawnSync(process.execPath, [promotionCli, 'check-references', statePath, join(directory, 'consumer-compatibility-lock.json')], { cwd: directory, encoding: 'utf8' });
+    assert.notEqual(mutable.status, 0);
+    assert.match(mutable.stderr, /deployments\/pacman-deployment\.yaml.*does not match compatibility state/);
+    writeFileSync(manifestPath, matchingManifest);
+    const restored = spawnSync(process.execPath, [promotionCli, 'check-references', statePath, join(directory, 'consumer-compatibility-lock.json')], { cwd: directory, encoding: 'utf8' });
+    assert.equal(restored.status, 0, restored.stderr);
+    const versionPath = join(directory, 'cilium-demos/fault-demo/README.md');
+    const matchingVersion = readFileSync(versionPath, 'utf8');
+    writeFileSync(versionPath, matchingVersion.replace(`export CHART_VERSION=${state.chart.version}`, 'export CHART_VERSION=9.9.9'));
+    const staleVersion = spawnSync(process.execPath, [promotionCli, 'check-references', statePath, join(directory, 'consumer-compatibility-lock.json')], { cwd: directory, encoding: 'utf8' });
+    assert.notEqual(staleVersion.status, 0);
+    assert.match(staleVersion.stderr, /CHART_VERSION.*does not match promotion state/);
+    writeFileSync(versionPath, matchingVersion);
+    const coherent = spawnSync(process.execPath, [promotionCli, 'check-references', statePath, join(directory, 'consumer-compatibility-lock.json')], { cwd: directory, encoding: 'utf8' });
+    assert.equal(coherent.status, 0, coherent.stderr);
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 function filterPendingState(state, pullRequests, branchSha = 'a'.repeat(40), baseSha = 'd'.repeat(40)) {
@@ -119,6 +263,15 @@ test('workflow query uses supported branch filtering and requests repository ide
   assert.match(query, /--head automation\/pacman-promotion/);
   assert.doesNotMatch(query, /--head saintdle:/);
   assert.match(query, /isCrossRepository/);
+});
+
+test('every promotion PR runs the consumer drift contract and lifecycle workflow', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/lint.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /pull_request:\n/);
+  assert.doesNotMatch(workflow, /pull_request:\n\s+branches:/);
+  assert.match(workflow, /node --test tests\/pacman-promotion\.test\.mjs/);
+  assert.match(workflow, /node tools\/pacman-promotion\.mjs check-references/);
+  assert.match(workflow, /bash tests\/lifecycle\.sh/);
 });
 
 test('workflow yq command updates only Pacman immutable image digests', () => {

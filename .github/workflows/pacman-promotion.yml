@@ -138,6 +138,7 @@ jobs:
           done
           node tools/pacman-promotion.mjs update-docs
           node tools/pacman-promotion.mjs write-state /tmp/pacman-promotion-plan.json pacman-promotion-state.json
+          node tools/pacman-promotion.mjs check-references
           git diff --check
 
       - name: Validate manifests and references

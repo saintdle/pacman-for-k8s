@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 
 const chartRepo = 'saintdle/helm-charts';
 const appRepo = 'saintdle/pacman';
@@ -11,6 +12,21 @@ const versionRe = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 const digestRe = /^sha256:[a-f0-9]{64}$/;
 const shaRe = /^[a-f0-9]{64}$/;
 const commitRe = /^[a-f0-9]{40}$/;
+const managedImageManifestPaths = [
+  'deployments/pacman-deployment.yaml',
+  'cilium-demos/canary-progressive-delivery/canary.yaml',
+  'cilium-demos/cluster-mesh-failover/clustermesh-demo.yaml',
+  'cilium-demos/fault-injection-resilience/fault-demo.yaml',
+  'cilium-demos/grpc-grpcroute/grpcroute.yaml',
+  'cilium-demos/load-simulation/node-user-simulator.yaml',
+  'cilium-demos/microservices-east-west/workloads.yaml',
+  'cilium-demos/runtime-security-incident/incident-demo.yaml',
+  'cilium-demos/tetragon-enforcement/tetragon-demo.yaml',
+  'cilium-demos/topology-aware-routing/topology-demo.yaml',
+];
+const managedImageTextPaths = ['README.md', 'cilium-demos/README.md', 'cilium-demos/scripts/deploy-demo.sh'];
+export const MANAGED_IMAGE_REFERENCE_PATHS = [...managedImageManifestPaths, ...managedImageTextPaths];
+export const MANAGED_VERSION_REFERENCE_PATHS = ['README.md', 'cilium-demos/fault-demo/README.md'];
 
 function fail(message) { throw new Error(message); }
 function version(value, name = 'version') {
@@ -272,6 +288,62 @@ function makeCompatibilityLock(candidate) {
   };
   return lock;
 }
+
+export function assertManagedConsumerReferences({ state, compatibilityLock = null, references }) {
+  if (state?.schema_version !== 1 || state.kind !== 'pacman-k8s-promotion-state' || !state.app || !state.chart) {
+    fail('promotion state is incomplete');
+  }
+  if (typeof state.app.image_repository !== 'string'
+    || !/^[a-z0-9][a-z0-9.-]*(?::[0-9]+)?(?:\/[a-z0-9._-]+)+$/.test(state.app.image_repository)
+    || !digestRe.test(state.app.image_manifest_list_digest ?? '')) fail('promotion state has an invalid app image identity');
+  const expectedImage = `${state.app.image_repository}@${state.app.image_manifest_list_digest}`;
+  const files = new Map(references.map(({ path, content }) => [path, content]));
+  const imagePaths = [...managedImageManifestPaths, ...managedImageTextPaths];
+  for (const path of imagePaths) if (!files.has(path)) fail(`${path} is a required managed image surface`);
+  for (const path of managedImageManifestPaths) {
+    const images = [...files.get(path).matchAll(/^\s*image:\s*(\S+)\s*$/gm)].map(([, image]) => image);
+    if (!images.length) fail(`${path} has no managed workload image`);
+    for (const image of images) if (image !== expectedImage) fail(`${path} image ${image} does not match compatibility state ${expectedImage}`);
+  }
+  const imageTextChecks = [
+    ['README.md', /roles pinned to `([^`]+)`/g],
+    ['cilium-demos/README.md', /Default image: `([^`]+)`/g],
+    ['cilium-demos/scripts/deploy-demo.sh', /PACMAN_IMAGE="\$\{PACMAN_IMAGE:-([^}]+)\}"/g],
+  ];
+  for (const [path, expression] of imageTextChecks) {
+    const found = [...files.get(path).matchAll(expression)];
+    if (found.length !== 1) fail(`${path} must declare its managed Pac-Man image exactly once`);
+    if (found[0][1] !== expectedImage) fail(`${path} image ${found[0][1]} does not match compatibility state ${expectedImage}`);
+  }
+
+  for (const path of MANAGED_VERSION_REFERENCE_PATHS) if (!files.has(path)) fail(`${path} is a required managed version surface`);
+  const checkVersion = (path, expression, expected, name) => {
+    const found = [...files.get(path).matchAll(expression)];
+    if (found.length !== 1) fail(`${path} must declare its managed ${name} exactly once`);
+    if (found[0][1] !== expected) fail(`${path} ${name} ${found[0][1]} does not match promotion state ${expected}`);
+  };
+  checkVersion('README.md', /raw manifests use app `([^`]+)`, matching chart `([^`]+)`/g,
+    state.app.version, 'app version');
+  const readmeChart = [...files.get('README.md').matchAll(/raw manifests use app `([^`]+)`, matching chart `([^`]+)`/g)];
+  if (readmeChart.length !== 1 || readmeChart[0][2] !== state.chart.version) fail(`README.md chart version does not match promotion state ${state.chart.version}`);
+  checkVersion('README.md', /Use `--version ([^`]+)` to reproduce the app\/chart pair above\./g, state.chart.version, 'Helm version');
+  checkVersion('cilium-demos/fault-demo/README.md', /published Pac-Man chart `([^`]+)`/g, state.chart.version, 'chart version');
+  checkVersion('cilium-demos/fault-demo/README.md', /releases\/tag\/pacman-([^)\s]+)/g, state.chart.version, 'chart release tag');
+  checkVersion('cilium-demos/fault-demo/README.md', /^export CHART_VERSION=([^\s]+)$/gm, state.chart.version, 'CHART_VERSION');
+
+  const hasTypedV1Identity = state.app.format === 'app-release-v1' && state.chart.format === 'chart-release-v1';
+  if (hasTypedV1Identity && !compatibilityLock) fail('verified v1 app and chart identities require a compatibility lock');
+  if (compatibilityLock) {
+    if (!hasTypedV1Identity) fail('legacy or mixed-format identities cannot carry a compatibility lock');
+    if (!isDeepStrictEqual(compatibilityLock, makeCompatibilityLock(state))) fail('compatibility lock does not match promotion state');
+  }
+  return expectedImage;
+}
+
+function readManagedConsumerReferences() {
+  const paths = [...new Set([...MANAGED_IMAGE_REFERENCE_PATHS, ...MANAGED_VERSION_REFERENCE_PATHS])];
+  return paths.map((path) => ({ path, content: readFileSync(path, 'utf8') }));
+}
 async function selectLatestChart() {
   const releases = await (await api(`/repos/${chartRepo}/releases?per_page=100`)).json();
   const sorted = releases.filter((rel) => !rel.draft && !rel.prerelease)
@@ -340,6 +412,14 @@ async function main() {
       target_chart_reference: plan.chart.reference, target_chart_sha256: plan.chart.sha256, reason: plan.rollback_reason };
     writeFileSync(statePath, JSON.stringify(state, null, 2) + '\n');
     if (plan.compatibility_lock) writeFileSync('consumer-compatibility-lock.json', JSON.stringify(plan.compatibility_lock, null, 2) + '\n');
+    else if (existsSync('consumer-compatibility-lock.json')) rmSync('consumer-compatibility-lock.json');
+    return;
+  }
+  if (command === 'check-references') {
+    const state = readState(planPath || 'pacman-promotion-state.json');
+    const lockPath = statePath || 'consumer-compatibility-lock.json';
+    const compatibilityLock = existsSync(lockPath) ? readState(lockPath) : null;
+    assertManagedConsumerReferences({ state, compatibilityLock, references: readManagedConsumerReferences() });
     return;
   }
   if (command === 'update-docs') {
@@ -362,7 +442,7 @@ async function main() {
     const candidate = await selectLatestChart();
     console.log(JSON.stringify(candidate)); return;
   }
-  fail('usage: pacman-promotion.mjs plan <plan.json> | write-state <plan.json> <state.json> | update-docs | verify-assets');
+  fail('usage: pacman-promotion.mjs plan <plan.json> | write-state <plan.json> <state.json> | check-references [state.json] [lock.json] | update-docs | verify-assets');
 }
 
 if (process.argv[1]?.endsWith('/pacman-promotion.mjs')) main().catch((error) => { console.error(error.message); process.exitCode = 1; });
