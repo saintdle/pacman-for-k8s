@@ -39,7 +39,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - run: bash tests/lifecycle.sh
+      - name: Run offline raw-manifest and Helm lifecycle regressions
+        run: |
+          bash tests/lifecycle.sh
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'pacman_helm_uninstall_test.py'
 
   yamllint:
     runs-on: ubuntu-latest
