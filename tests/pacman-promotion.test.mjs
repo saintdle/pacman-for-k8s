@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { assertManagedConsumerReferences, MANAGED_IMAGE_CONTAINER_COUNTS, MANAGED_IMAGE_REFERENCE_PATHS, MANAGED_VERSION_REFERENCE_PATHS, planConsumerPromotion, rollbackRequiresExplicitResume, validateAppReleaseMetadata } from '../tools/pacman-promotion.mjs';
+import { assertManagedConsumerReferences, MANAGED_IMAGE_CONTAINER_COUNTS, MANAGED_IMAGE_REFERENCE_PATHS, MANAGED_VERSION_REFERENCE_PATHS, parseRollbackChartReference, planConsumerPromotion, planPromotionCandidate, rollbackCandidate, rollbackRequiresExplicitResume, validateAppReleaseMetadata } from '../tools/pacman-promotion.mjs';
 
 const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/promotion/${name}`, import.meta.url), 'utf8'));
 const initialState = JSON.parse(readFileSync(new URL('../pacman-promotion-state.json', import.meta.url), 'utf8'));
@@ -13,6 +14,57 @@ const promotionCli = fileURLToPath(new URL('../tools/pacman-promotion.mjs', impo
 const promotionWorkflow = fileURLToPath(new URL('../.github/workflows/pacman-promotion.yml', import.meta.url));
 const current = fixture('current.json');
 const newer = fixture('newer.json');
+
+function rollbackFixture({ generated = true, alterRecord = (record) => record } = {}) {
+  const tag = 'pacman-0.7.16';
+  const chartVersion = '0.7.16';
+  const appVersion = '0.7.15';
+  const packageReference = `https://github.com/saintdle/helm-charts/releases/download/${tag}/pacman-${chartVersion}.tgz`;
+  const recordReference = `https://github.com/saintdle/helm-charts/releases/download/${tag}/chart-release-record.json`;
+  const appReference = `https://github.com/saintdle/pacman/releases/download/pacman-v${appVersion}/app-release-record.json`;
+  const packageBytes = Buffer.from('deterministic chart package bytes');
+  const packageSha = createHash('sha256').update(packageBytes).digest('hex');
+  const record = generated ? alterRecord({
+    schema_version: 1,
+    kind: 'chart-release',
+    chart_version: chartVersion,
+    source: { repository: 'https://github.com/saintdle/pacman', commit: 'b'.repeat(40) },
+    package: { filename: `pacman-${chartVersion}.tgz`, sha256: packageSha, immutable_url: packageReference },
+    app_release: { reference: appReference, sha256: 'd'.repeat(64) },
+  }) : null;
+  const recordBytes = record && Buffer.from(JSON.stringify(record));
+  const recordSha = recordBytes && createHash('sha256').update(recordBytes).digest('hex');
+  const releaseData = { draft: false, prerelease: false, tag_name: tag, assets: [
+    { name: `pacman-${chartVersion}.tgz`, browser_download_url: packageReference },
+    ...(generated ? [{ name: 'chart-release-record.json', browser_download_url: recordReference }] : []),
+  ] };
+  const requestedAssets = [];
+  const verifiedAssets = new Map([
+    [`pacman-${chartVersion}.tgz`, { data: packageBytes, checksum: packageSha, url: packageReference }],
+    ...(generated ? [['chart-release-record.json', { data: recordBytes, checksum: recordSha, url: recordReference }]] : []),
+  ]);
+  const app = { version: appVersion, reference: appReference, sha256: 'd'.repeat(64), source_commit: 'e'.repeat(40),
+    source_repository: 'https://github.com/saintdle/pacman', image_repository: 'docker.io/saintdle/pacman',
+    image_manifest_list_digest: `sha256:${'f'.repeat(64)}`, format: generated ? 'app-release-v1' : 'legacy-release-metadata-v0',
+    ...(!generated ? { missing_evidence: ['app-release-record', 'platform-descriptors', 'provenance', 'signature'] } : {}) };
+  return {
+    packageReference, packageSha, recordReference, recordSha, appReference, requestedAssets, record, releaseData, app,
+    options: {
+      packageRef: packageReference, packageSha, appRef: appReference, appSha: 'd'.repeat(64), reason: 'Restore the last known-good release',
+      getRelease: async () => releaseData,
+      getVerifiedAsset: async (_release, name) => { requestedAssets.push(name); return verifiedAssets.get(name); },
+      readPackageMetadata: () => ({ chartVersion, appVersion, imageDigest: `sha256:${'f'.repeat(64)}` }),
+      verifyAppRelease: async (version, reference, sha, imageDigest) => {
+        assert.equal(version, appVersion);
+        assert.equal(reference, appReference);
+        assert.equal(sha, 'd'.repeat(64));
+        assert.equal(imageDigest, `sha256:${'f'.repeat(64)}`);
+        return app;
+      },
+      resolveTagCommit: async () => 'b'.repeat(40),
+    },
+  };
+}
 
 function syntheticTypedState() {
   const state = structuredClone(initialState);
@@ -396,4 +448,94 @@ test('explicit rollback is a proposal requiring older target and reason', () => 
   assert.equal(plan.action, 'rollback-proposal');
   assert.equal(plan.rollback_reason, 'Restore known chart package');
   assert.throws(() => planConsumerPromotion({ current, candidate: target, mode: 'rollback', reason: '' }), /requires a reason/);
+});
+
+test('rollback package URL parser captures canonical stable 0.x and 1.x versions', () => {
+  assert.deepEqual(parseRollbackChartReference('https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.17/pacman-0.7.17.tgz'), {
+    tag: 'pacman-0.7.17', filename: 'pacman-0.7.17.tgz', chartVersion: '0.7.17',
+  });
+  assert.deepEqual(parseRollbackChartReference('https://github.com/saintdle/helm-charts/releases/download/helm-chart-v1.7.17/pacman-1.7.17.tgz'), {
+    tag: 'helm-chart-v1.7.17', filename: 'pacman-1.7.17.tgz', chartVersion: '1.7.17',
+  });
+  for (const reference of [
+    'https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.17/pacman-0.7.18.tgz',
+    'https://github.com/saintdle/helm-charts/releases/download/pacman-0.07.17/pacman-0.07.17.tgz',
+    'https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.017/pacman-0.7.017.tgz',
+    'https://github.com/saintdle/helm-charts/releases/download/pacman-00.7.17/pacman-00.7.17.tgz',
+    'https://github.com/example/helm-charts/releases/download/pacman-0.7.17/pacman-0.7.17.tgz',
+  ]) assert.throws(() => parseRollbackChartReference(reference), /rollback chart (reference|tag)/);
+});
+
+test('rollback candidate selects and preserves a verified generated chart record and v1 lock', async () => {
+  const fixtureCase = rollbackFixture();
+  const candidate = await rollbackCandidate(fixtureCase.options);
+  assert.deepEqual(fixtureCase.requestedAssets, ['pacman-0.7.16.tgz', 'chart-release-record.json']);
+  assert.deepEqual(candidate.chart, {
+    version: '0.7.16', reference: fixtureCase.recordReference,
+    sha256: fixtureCase.recordSha,
+    package_reference: fixtureCase.packageReference, package_sha256: fixtureCase.packageSha,
+    source_repository: 'https://github.com/saintdle/pacman', source_commit: 'b'.repeat(40), format: 'chart-release-v1',
+  });
+  assert.equal(candidate.app.format, 'app-release-v1');
+  assert.equal(candidate.app.reference, fixtureCase.appReference);
+  const plan = planPromotionCandidate({ current, candidate, mode: 'rollback', reason: fixtureCase.options.reason });
+  assert.equal(plan.action, 'rollback-proposal');
+  const lock = plan.compatibility_lock;
+  assert.ok(lock);
+  assert.equal(lock.chart.reference, fixtureCase.recordReference);
+  assert.equal(lock.chart.package_reference, fixtureCase.packageReference);
+  assert.equal(lock.chart.source_repository, 'https://github.com/saintdle/pacman');
+  const state = { ...initialState, app: candidate.app, chart: candidate.chart };
+  assert.equal(assertManagedConsumerReferences({ state, compatibilityLock: lock, references: managedReferences(state) }),
+    `${candidate.app.image_repository}@${candidate.app.image_manifest_list_digest}`);
+});
+
+test('rollback rejects malformed or forged generated chart records without legacy fallback', async () => {
+  const invalidRecords = [
+    { mutate: (record) => ({ ...record, source: { ...record.source, repository: 'https://github.com/attacker/pacman' } }), message: /source identity is invalid/ },
+    { mutate: (record) => ({ ...record, source: { ...record.source, commit: 'not-a-commit' } }), message: /source identity is invalid/ },
+    { mutate: (record) => ({ ...record, package: { ...record.package, immutable_url: 'https://example.invalid/chart.tgz' } }), message: /package identity or checksum is invalid/ },
+    { mutate: (record) => ({ ...record, package: { ...record.package, sha256: 'c'.repeat(64) } }), message: /package identity or checksum is invalid/ },
+    { mutate: (record) => ({ ...record, app_release: { ...record.app_release, unexpected: true } }), message: /chart app release identity has an invalid schema/ },
+    { mutate: (record) => ({ ...record, unexpected: true }), message: /invalid schema/ },
+  ];
+  for (const invalid of invalidRecords) {
+    const fixtureCase = rollbackFixture({ alterRecord: invalid.mutate });
+    await assert.rejects(rollbackCandidate(fixtureCase.options), invalid.message);
+    assert.deepEqual(fixtureCase.requestedAssets, ['pacman-0.7.16.tgz', 'chart-release-record.json']);
+  }
+  const mismatchedRecordReference = rollbackFixture();
+  const getVerifiedAsset = mismatchedRecordReference.options.getVerifiedAsset;
+  mismatchedRecordReference.options.getVerifiedAsset = async (releaseData, name) => {
+    const verified = await getVerifiedAsset(releaseData, name);
+    return name === 'chart-release-record.json' ? { ...verified, url: `${verified.url}.forged` } : verified;
+  };
+  await assert.rejects(rollbackCandidate(mismatchedRecordReference.options), /record reference is not immutable/);
+
+  const malformed = rollbackFixture();
+  const getVerifiedAssetForMalformed = malformed.options.getVerifiedAsset;
+  malformed.options.getVerifiedAsset = async (_release, name) => {
+    if (name === 'chart-release-record.json') {
+      malformed.requestedAssets.push(name);
+      return { data: Buffer.from('{'), checksum: 'a'.repeat(64), url: malformed.recordReference };
+    }
+    return getVerifiedAssetForMalformed(malformed.releaseData, name);
+  };
+  await assert.rejects(rollbackCandidate(malformed.options));
+  assert.deepEqual(malformed.requestedAssets, ['pacman-0.7.16.tgz', 'chart-release-record.json']);
+
+  const mismatchedApp = rollbackFixture();
+  mismatchedApp.options.appRef = 'https://github.com/saintdle/pacman/releases/download/pacman-v0.7.15/release-metadata.json';
+  await assert.rejects(rollbackCandidate(mismatchedApp.options), /does not match chart release record/);
+});
+
+test('rollback retains explicit legacy chart compatibility and missing evidence', async () => {
+  const fixtureCase = rollbackFixture({ generated: false });
+  const candidate = await rollbackCandidate(fixtureCase.options);
+  assert.deepEqual(fixtureCase.requestedAssets, ['pacman-0.7.16.tgz']);
+  assert.equal(candidate.chart.reference, fixtureCase.packageReference);
+  assert.equal(candidate.chart.format, 'legacy-chart-package-v0');
+  assert.deepEqual(candidate.chart.missing_evidence, ['chart-release-record', 'chart-source-identity']);
+  const plan = planPromotionCandidate({ current, candidate, mode: 'rollback', reason: fixtureCase.options.reason });
+  assert.equal(plan.compatibility_lock, null);
 });

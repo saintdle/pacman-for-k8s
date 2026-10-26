@@ -8,7 +8,8 @@ import { isDeepStrictEqual } from 'node:util';
 const chartRepo = 'saintdle/helm-charts';
 const appRepo = 'saintdle/pacman';
 const imageRepo = 'docker.io/saintdle/pacman';
-const versionRe = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const stableVersionPattern = '(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)';
+const versionRe = new RegExp(`^${stableVersionPattern}$`);
 const digestRe = /^sha256:[a-f0-9]{64}$/;
 const shaRe = /^[a-f0-9]{64}$/;
 const commitRe = /^[a-f0-9]{40}$/;
@@ -75,7 +76,7 @@ function hasAppliedRollbackState(state) {
     && typeof state.rollback?.reason === 'string' && state.rollback.reason.trim().length >= 8;
 }
 function versionFromAsset(reference) {
-  const match = /\/releases\/download\/pacman-v((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/(?:app-release-record|release-metadata)\.json$/.exec(reference ?? '');
+  const match = new RegExp(`/releases/download/pacman-v(${stableVersionPattern})/(?:app-release-record|release-metadata)\\.json$`).exec(reference ?? '');
   if (!match) fail('app release reference does not identify a supported immutable release asset');
   return match[1];
 }
@@ -149,21 +150,23 @@ export function rollbackRequiresExplicitResume({ currentState, pendingState, mod
   return mode !== 'rollback' && (currentState?.mode === 'rollback' || pendingState?.mode === 'rollback');
 }
 
-export function validateChartRecord(record, bytes, release, packageBytes) {
+export function validateChartRecord(record, bytes, release, packageBytes, recordReference) {
   exactKeys(record, ['schema_version', 'kind', 'chart_version', 'source', 'package', 'app_release'], 'chart release record');
   if (record.schema_version !== 1 || record.kind !== 'chart-release') fail('unsupported chart record schema');
   version(record.chart_version, 'chart_version');
   const tag = release.tag_name;
   if (![ `pacman-${record.chart_version}`, `helm-chart-v${record.chart_version}` ].includes(tag)) fail('chart tag does not match chart_version');
+  if (recordReference !== releaseAssetUrl(chartRepo, tag, 'chart-release-record.json')) fail('chart release record reference is not immutable');
   exactKeys(record.source, ['repository', 'commit'], 'chart source');
   if (record.source.repository !== 'https://github.com/saintdle/pacman' || !commitRe.test(record.source.commit)) fail('chart source identity is invalid');
   exactKeys(record.package, ['filename', 'sha256', 'immutable_url'], 'chart package');
   const expectedPackageUrl = releaseAssetUrl(chartRepo, tag, `pacman-${record.chart_version}.tgz`);
   if (record.package.filename !== `pacman-${record.chart_version}.tgz` || record.package.immutable_url !== expectedPackageUrl
     || checksum(packageBytes) !== record.package.sha256) fail('chart package identity or checksum is invalid');
-  const appVersion = versionFromAsset(record.app_release?.reference);
+  exactKeys(record.app_release, ['reference', 'sha256'], 'chart app release identity');
+  const appVersion = versionFromAsset(record.app_release.reference);
   if (record.app_release.reference !== releaseAssetUrl(appRepo, `pacman-v${appVersion}`, record.app_release.reference.endsWith('/app-release-record.json') ? 'app-release-record.json' : 'release-metadata.json')) fail('chart app reference is not immutable');
-  if (!shaRe.test(record.app_release?.sha256 ?? '') || !bytes?.length) fail('chart record checksum or bytes are missing');
+  if (!shaRe.test(record.app_release.sha256 ?? '') || !bytes?.length) fail('chart record checksum or bytes are missing');
   record.app_release.version = appVersion;
   return record;
 }
@@ -202,6 +205,23 @@ async function verifiedAsset(releaseData, name) {
 }
 function verifyVersionTag(releaseData, expected) {
   if (releaseData.draft || releaseData.prerelease || releaseData.tag_name !== expected) fail(`release ${expected} is not published and stable`);
+}
+export function parseRollbackChartReference(reference) {
+  const pattern = new RegExp(`^https://github\\.com/saintdle/helm-charts/releases/download/([^/]+)/(pacman-(${stableVersionPattern})\\.tgz)$`);
+  const match = pattern.exec(reference ?? '');
+  if (!match) fail('rollback chart reference must be the immutable Pac-Man chart package asset');
+  const [, tag, filename, chartVersion] = match;
+  if (![ `pacman-${chartVersion}`, `helm-chart-v${chartVersion}` ].includes(tag)) fail('rollback chart tag/version mismatch');
+  return { tag, filename, chartVersion };
+}
+async function generatedChartCandidate({ recordAsset, releaseData, packageAsset, chartVersion }) {
+  const record = JSON.parse(recordAsset.data.toString());
+  validateChartRecord(record, recordAsset.data, releaseData, packageAsset.data, recordAsset.url);
+  return {
+    appRelease: record.app_release,
+    chart: { version: chartVersion, reference: recordAsset.url, sha256: recordAsset.checksum, package_reference: packageAsset.url,
+      package_sha256: packageAsset.checksum, source_repository: record.source.repository, source_commit: record.source.commit, format: 'chart-release-v1' },
+  };
 }
 async function verifyApp(versionValue, expectedRef, expectedSha, expectedDigest) {
   version(versionValue, 'app version');
@@ -258,31 +278,47 @@ function chartPackageMetadata(packageBytes) {
     return { chartVersion, appVersion, imageDigest };
   } finally { rmSync(temp, { recursive: true, force: true }); }
 }
-async function rollbackCandidate() {
-  const packageRef = process.env.ROLLBACK_CHART_PACKAGE_REF ?? '';
-  const packageSha = process.env.ROLLBACK_CHART_PACKAGE_SHA256 ?? '';
-  const appRef = process.env.ROLLBACK_APP_REF ?? '';
-  const appSha = process.env.ROLLBACK_APP_SHA256 ?? '';
-  const reason = process.env.ROLLBACK_REASON?.trim() ?? '';
+export async function rollbackCandidate(options = {}) {
+  const packageRef = options.packageRef ?? process.env.ROLLBACK_CHART_PACKAGE_REF ?? '';
+  const packageSha = options.packageSha ?? process.env.ROLLBACK_CHART_PACKAGE_SHA256 ?? '';
+  const appRef = options.appRef ?? process.env.ROLLBACK_APP_REF ?? '';
+  const appSha = options.appSha ?? process.env.ROLLBACK_APP_SHA256 ?? '';
+  const reason = (options.reason ?? process.env.ROLLBACK_REASON ?? '').trim();
+  const getRelease = options.getRelease ?? release;
+  const getVerifiedAsset = options.getVerifiedAsset ?? verifiedAsset;
+  const readPackageMetadata = options.readPackageMetadata ?? chartPackageMetadata;
+  const verifyAppRelease = options.verifyAppRelease ?? verifyApp;
+  const resolveTagCommit = options.resolveTagCommit ?? tagCommit;
   if (!packageRef || !shaRe.test(packageSha) || !appRef || !shaRe.test(appSha) || reason.length < 8) fail('rollback requires immutable app/chart asset references, both checksums, and a reason of at least 8 characters');
-  const match = /^https:\/\/github\.com\/saintdle\/helm-charts\/releases\/download\/([^/]+)\/(pacman-(0|[1-9]\d*\.\d+\.\d+)\.tgz)$/.exec(packageRef);
-  if (!match) fail('rollback chart reference must be the immutable Pac-Man chart package asset');
-  const [, tag, filename, chartVersion] = match;
-  if (![ `pacman-${chartVersion}`, `helm-chart-v${chartVersion}` ].includes(tag)) fail('rollback chart tag/version mismatch');
-  const rel = await release(chartRepo, tag);
+  const { tag, filename, chartVersion } = parseRollbackChartReference(packageRef);
+  const rel = await getRelease(chartRepo, tag);
   verifyVersionTag(rel, tag);
-  const pkg = await verifiedAsset(rel, filename);
+  const pkg = await getVerifiedAsset(rel, filename);
   if (pkg.url !== packageRef || pkg.checksum !== packageSha) fail('rollback chart package reference/checksum mismatch');
-  const metadata = chartPackageMetadata(pkg.data);
+  const metadata = readPackageMetadata(pkg.data);
   if (metadata.chartVersion !== chartVersion) fail('rollback chart package contents do not match requested version');
-  const appVersion = versionFromAsset(appRef);
+  let chart;
+  let selectedAppRef = appRef;
+  let selectedAppSha = appSha;
+  const recordAsset = rel.assets.some((item) => item.name === 'chart-release-record.json')
+    ? await getVerifiedAsset(rel, 'chart-release-record.json') : null;
+  if (recordAsset) {
+    const generated = await generatedChartCandidate({ recordAsset, releaseData: rel, packageAsset: pkg, chartVersion });
+    if (appRef !== generated.appRelease.reference || appSha !== generated.appRelease.sha256) fail('rollback app target does not match chart release record');
+    chart = generated.chart;
+    selectedAppRef = generated.appRelease.reference;
+    selectedAppSha = generated.appRelease.sha256;
+  } else {
+    chart = { version: chartVersion, reference: packageRef, sha256: packageSha, package_reference: packageRef,
+      package_sha256: packageSha, source_repository: `https://github.com/${chartRepo}`, source_commit: await resolveTagCommit(chartRepo, tag),
+      format: 'legacy-chart-package-v0', missing_evidence: ['chart-release-record', 'chart-source-identity'] };
+  }
+  const appVersion = versionFromAsset(selectedAppRef);
   if (appVersion !== metadata.appVersion) fail('rollback app target does not match chart package appVersion');
-  const app = await verifyApp(appVersion, appRef, appSha, metadata.imageDigest);
-  return { app, chart: { version: chartVersion, reference: packageRef, sha256: packageSha, package_reference: packageRef,
-    package_sha256: packageSha, source_repository: `https://github.com/${chartRepo}`, source_commit: await tagCommit(chartRepo, tag),
-    format: 'legacy-chart-package-v0', missing_evidence: ['chart-release-record', 'chart-source-identity'] }, reason };
+  const app = await verifyAppRelease(appVersion, selectedAppRef, selectedAppSha, metadata.imageDigest);
+  return { app, chart, reason };
 }
-function makeCompatibilityLock(candidate) {
+export function makeCompatibilityLock(candidate) {
   const lock = {
     schema_version: 1,
     kind: 'consumer-compatibility-lock',
@@ -299,6 +335,12 @@ function makeCompatibilityLock(candidate) {
     supported_evidence_lanes: ['app-manifest-list', 'app-platform-descriptors', 'app-provenance', 'app-signature', 'chart-package-sha256'],
   };
   return lock;
+}
+export function planPromotionCandidate({ current, candidate, pending, mode = 'reconcile', reason = '' }) {
+  const plan = planConsumerPromotion({ current, candidate, pending, mode, reason });
+  if (plan.action !== 'noop') plan.compatibility_lock = candidate.app.format === 'app-release-v1' && candidate.chart.format === 'chart-release-v1'
+    ? makeCompatibilityLock(candidate) : null;
+  return plan;
 }
 
 export function assertManagedConsumerReferences({ state, compatibilityLock = null, references }) {
@@ -367,6 +409,7 @@ async function selectLatestChart() {
   if (!sorted.length) fail('no stable chart release exists');
   const { rel, version: chartVersion } = sorted[0];
   const packageAsset = await verifiedAsset(rel, `pacman-${chartVersion}.tgz`);
+  if (packageAsset.url !== releaseAssetUrl(chartRepo, rel.tag_name, `pacman-${chartVersion}.tgz`)) fail('chart package reference is not immutable');
   const recordAsset = rel.assets.some((item) => item.name === 'chart-release-record.json')
     ? await verifiedAsset(rel, 'chart-release-record.json') : null;
   if (!recordAsset) {
@@ -381,16 +424,10 @@ async function selectLatestChart() {
       source_commit: await tagCommit(chartRepo, rel.tag_name), format: 'legacy-chart-package-v0',
       missing_evidence: ['chart-release-record', 'chart-source-identity'] } };
   }
-  const record = JSON.parse(recordAsset.data.toString());
-  validateChartRecord(record, recordAsset.data, rel, packageAsset.data);
-  const appRelease = record.app_release;
+  const generated = await generatedChartCandidate({ recordAsset, releaseData: rel, packageAsset, chartVersion });
+  const appRelease = generated.appRelease;
   const app = await verifyApp(appRelease.version, appRelease.reference, appRelease.sha256);
-  if (!commitRe.test(record.source.commit)) fail('chart source commit is invalid');
-  return {
-    app,
-    chart: { version: chartVersion, reference: recordAsset.url, sha256: recordAsset.checksum, package_reference: packageAsset.url,
-      package_sha256: packageAsset.checksum, source_repository: record.source.repository, source_commit: record.source.commit, format: 'chart-release-v1' },
-  };
+  return { app, chart: generated.chart };
 }
 
 function readState(path) { try { return JSON.parse(readFileSync(path, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } }
@@ -413,10 +450,8 @@ async function main() {
     }
     const rollback = mode === 'rollback' ? await rollbackCandidate() : null;
     const candidate = rollback?.app ? { app: rollback.app, chart: rollback.chart } : await selectLatestChart();
-    const plan = planConsumerPromotion({ current, candidate, pending: state?.mode === 'automatic' ? state : null, mode,
+    const plan = planPromotionCandidate({ current, candidate, pending: state?.mode === 'automatic' ? state : null, mode,
       reason: rollback?.reason ?? '' });
-    if (plan.action !== 'noop') plan.compatibility_lock = candidate.app.format === 'app-release-v1' && candidate.chart.format === 'chart-release-v1'
-      ? makeCompatibilityLock(candidate) : null;
     writeFileSync(planPath, JSON.stringify(plan, null, 2) + '\n'); return;
   }
   if (command === 'write-state') {
