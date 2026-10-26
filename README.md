@@ -5,10 +5,15 @@ Extended deployment surface for the Pac-Man app maintained at
 in-repo set of learning examples (a multi-role `Deployment`, a postgres
 example with a migration `Job`, Cilium L7 example, Prometheus and Tetragon
 overlays) see
-[`saintdle/pacman/k8s/examples`](https://github.com/saintdle/pacman/tree/master/k8s/examples).
+[`saintdle/pacman/k8s/examples`](https://github.com/saintdle/pacman/tree/main/k8s/examples).
 
-This repo layers on persistent storage, Pod Security Standards, install
-scripts, and a catalogue of Cilium demos.
+This repository owns the Kubernetes platform surface: persistent storage,
+Pod Security Standards, install scripts, and Cilium/Tetragon scenarios. Its raw
+manifests and Kustomize examples are intentional teaching consumers that keep
+resource names and lifecycle steps visible; they are not alternate Helm chart
+sources. `saintdle/pacman` maintains the app and editable chart source, while
+`saintdle/helm-charts` distributes versioned packages through the stable
+<https://saintdle.github.io/helm-charts> repository.
 
 <img src="https://veducate.co.uk/wp-content/uploads/2021/09/Pac-Man-UI.jpg" width="45%" height="45%">
 
@@ -28,8 +33,10 @@ scripts, and a catalogue of Cilium demos.
 
 The raw manifests use app `0.7.16`, matching chart `0.7.17`, with all three
 roles pinned to `docker.io/saintdle/pacman@sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf`.
-Promotion updates retain the shared image pin. The Cilium demo wrapper
-accepts a `PACMAN_IMAGE` override.
+The released image includes the opt-in fault and synthetic security-probe
+runtime; the chart keeps these controls disabled by default. Promotion updates
+retain the shared image pin. The Cilium demo wrapper accepts a `PACMAN_IMAGE`
+override.
 
 ## Install (base mongo-backed deployment)
 
@@ -106,9 +113,10 @@ in this repo (pinned by digest, Pod Security Standards `restricted`),
 and supports both the MongoDB and PostgreSQL backends.
 
 Chart `0.7.17` defaults to an all-in-one app and Service port `80`. To use its
-split roles, set `--set roles.enabled=true`. These raw-manifest migration and
-uninstall scripts do not manage Helm releases; install Helm into a separate
+split roles, set `--set roles.enabled=true`. The raw-manifest migration and
+uninstall modes do not manage Helm releases; install Helm into a separate
 namespace. Use `--version 0.7.17` to reproduce the app/chart pair above.
+The Helm cleanup mode requires Python 3, Helm 3, and `kubectl`.
 
 ```bash
 helm repo add veducate https://saintdle.github.io/helm-charts/
@@ -146,12 +154,30 @@ helm install pacman veducate/pacman -n pacman-demo --create-namespace \
   --set ingress.hosts[0].paths[0].pathType=Prefix
 ```
 
-To uninstall:
+To uninstall a Pac-Man Helm release, use the Helm mode of the script. It checks
+the selected release and namespace, then retains the namespace, PVCs and
+chart-generated Secrets. This mode requires the release manifest to mark every
+present PVC and generated Secret with Helm's `resource-policy: keep`; it stops
+before uninstalling older charts that do not provide that guarantee. It keeps
+Helm history so a later explicit cleanup can still verify release provenance.
 
 ```bash
-helm uninstall pacman -n pacman-demo
-kubectl -n pacman-demo delete pvc --all   # PVCs are retained by default
+NAMESPACE=pacman-demo ./pacman-uninstall.sh --helm-release pacman
 ```
+
+To intentionally remove only the selected release's verified PVCs and
+chart-generated Secrets, opt in with `--delete-data`:
+
+```bash
+NAMESPACE=pacman-demo ./pacman-uninstall.sh --helm-release pacman --delete-data
+```
+
+Secrets supplied through `mongo.existingSecret` or `postgres.existingSecret`
+are not part of the release manifest and are left in place. A PVC's backing
+volume may remain or be deleted according to its StorageClass reclaim policy.
+Use this script for Helm cleanup: a separate `helm uninstall` removes release
+history, so later cleanup cannot safely prove which retained resources belong
+to that release.
 
 ## Cilium demo suite
 
@@ -220,7 +246,7 @@ persistentvolumeclaim/   Mongo data PVC
 security/                RBAC (rendered at install time) and Secret
 cilium-demos/            kind-based Cilium / Hubble / Tetragon demos
 pacman-install.sh        Idempotent installer (NAMESPACE override supported)
-pacman-uninstall.sh      Uninstaller with optional `keeppvc`
+pacman-uninstall.sh      Raw and release-scoped Helm uninstall modes
 tests/                  Offline regressions and opt-in disposable-cluster checks
 ```
 
@@ -240,3 +266,17 @@ It checks installs, legacy migration, retained credentials/data, demo isolation
 using Kubernetes-native workloads, and both uninstall modes. It does not prove
 external LoadBalancer access or Cilium/BPF enforcement. Those need separate
 environment-specific validation. Delete the disposable cluster when finished.
+
+The focused Helm cleanup fixture needs its own ARM64 Kind cluster named
+`pacman-helm-cleanup`; it installs only a local chart with a PVC and generated
+Secret, then checks retention, explicit cleanup, user Secret preservation and
+repeat behavior:
+
+```bash
+kind create cluster --name pacman-helm-cleanup \
+  --kubeconfig /tmp/pacman-helm-cleanup.kubeconfig
+KUBECONFIG=/tmp/pacman-helm-cleanup.kubeconfig \
+  PACMAN_HELM_TEST_CONTEXT=kind-pacman-helm-cleanup \
+  bash tests/helm-uninstall-smoke.sh
+kind delete cluster --name pacman-helm-cleanup
+```

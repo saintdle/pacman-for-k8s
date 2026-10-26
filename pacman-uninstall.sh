@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Usage: ./pacman-uninstall.sh [keeppvc]. The default deletes the namespace.
+# Raw-manifest mode: [keeppvc]. Helm mode: --helm-release NAME [--delete-data].
 set -euo pipefail
 cd "$(dirname "$0")"
+if [[ "${1:-}" == --helm-release ]]; then
+  exec python3 scripts/pacman-helm-uninstall.py "$@"
+fi
 NAMESPACE="${NAMESPACE:-pacman-demo}"
 MODE="${1:-}"
 if [[ $# -gt 1 || ( -n "$MODE" && "$MODE" != keeppvc ) ]]; then

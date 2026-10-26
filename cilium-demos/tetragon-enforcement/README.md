@@ -17,4 +17,7 @@ kubectl -n kube-system logs -l app.kubernetes.io/name=tetragon -c export-stdout 
 
 Expected result: the file probe reads `/app/demo-fixtures/synthetic-secret.txt`, and the exec probe starts a short-lived Node child process. Tetragon should emit process/file events tied to the Pac-Man pod.
 
-The policy is observe-only by default. Add enforcement actions only in a disposable lab.
+The policy is observe-only by default. Add enforcement actions only in a
+disposable lab. The public native workflow run verifies a loaded observe-only
+policy and correlated file/exec events; it does not verify enforcement. A
+policy loading successfully is not evidence that the kernel enforced an action.

@@ -25,6 +25,13 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 30
           env:
             - name: APP_VERSION
               value: tetragon-demo
