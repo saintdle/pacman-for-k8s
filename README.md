@@ -116,6 +116,7 @@ Chart `0.7.17` defaults to an all-in-one app and Service port `80`. To use its
 split roles, set `--set roles.enabled=true`. The raw-manifest migration and
 uninstall modes do not manage Helm releases; install Helm into a separate
 namespace. Use `--version 0.7.17` to reproduce the app/chart pair above.
+The Helm cleanup mode requires Python 3, Helm 3, and `kubectl`.
 
 ```bash
 helm repo add veducate https://saintdle.github.io/helm-charts/
