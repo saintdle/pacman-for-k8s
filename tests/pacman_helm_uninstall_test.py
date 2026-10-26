@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import pathlib
@@ -7,6 +8,11 @@ import unittest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location(
+    "pacman_helm_uninstall", ROOT / "scripts/pacman-helm-uninstall.py"
+)
+HELM_UNINSTALL = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(HELM_UNINSTALL)
 FAKE_KUBECTL = r'''#!/usr/bin/env python3
 import http.server, json, os, pathlib, re, sys
 state_path = pathlib.Path(os.environ['FAKE_STATE'])
@@ -125,7 +131,7 @@ def resource(kind, name, keep=True, release="pacman", namespace="helm-test"):
     }
 
 
-def render(resources):
+def render(resources, quote_annotation_keys=False):
     docs = []
     for item in resources:
         data = [
@@ -139,7 +145,14 @@ def render(resources):
         data += [f"    {key}: {value}" for key, value in item["labels"].items()]
         if item["annotations"]:
             data.append("  annotations:")
-            data += [f"    {key}: {value}" for key, value in item["annotations"].items()]
+            for key, value in item["annotations"].items():
+                if quote_annotation_keys is True:
+                    rendered_key = json.dumps(key)
+                elif quote_annotation_keys == "single":
+                    rendered_key = f"'{key}'"
+                else:
+                    rendered_key = key
+                data.append(f"    {rendered_key}: {value}")
         if item["kind"] == "Secret":
             data += ["type: Opaque", "stringData:", "  generated: test-fixture"]
         docs.append("\n".join(data))
@@ -147,11 +160,15 @@ def render(resources):
 
 
 def live_object(item, uid=None):
+    annotations = dict(item["annotations"])
+    if item["labels"].get("app.kubernetes.io/managed-by") == "Helm":
+        annotations.setdefault("meta.helm.sh/release-name", item["labels"]["app.kubernetes.io/instance"])
+        annotations.setdefault("meta.helm.sh/release-namespace", item["namespace"])
     metadata = {
         "name": item["name"],
         "namespace": item["namespace"],
         "labels": dict(item["labels"]),
-        "annotations": dict(item["annotations"]),
+        "annotations": annotations,
         "uid": uid or "uid-" + item["kind"] + "-" + item["name"],
         "resourceVersion": "42",
     }
@@ -232,6 +249,49 @@ class HelmUninstallTests(unittest.TestCase):
         self.assertIn("PersistentVolumeClaim/pacman-mongo", state["objects"])
         self.assertIn("Secret/pacman-mongo", state["objects"])
         self.assertEqual(state["delete_attempts"], [])
+
+    def test_normal_mode_retains_data_with_quoted_annotation_keys(self):
+        for quote_style in (True, "single"):
+            with self.subTest(quote_style=quote_style):
+                self.setUpStateForSubtest()
+                self.state["manifest"] = render(self.manifest_resources, quote_annotation_keys=quote_style)
+                self.write_state()
+                result = self.run_script("--helm-release", "pacman")
+                state = self.read_state()
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(state["release"]["status"], "uninstalled")
+                self.assertIn("PersistentVolumeClaim/pacman-mongo", state["objects"])
+                self.assertIn("Secret/pacman-mongo", state["objects"])
+
+    def test_current_chart_render_metadata_fixtures_keep_pvc_and_secret(self):
+        fixtures = sorted((ROOT / "tests/fixtures/helm-retention").glob("*.yaml"))
+        self.assertEqual(len(fixtures), 4, "expected both databases from both current charts")
+        for fixture in fixtures:
+            with self.subTest(fixture=fixture.name):
+                resources = HELM_UNINSTALL.parse_manifest(fixture.read_text())
+                candidates = [x for x in resources if x["kind"] in ("Secret", "PersistentVolumeClaim")]
+                self.assertEqual({x["kind"] for x in candidates}, {"Secret", "PersistentVolumeClaim"})
+                self.assertEqual(len(candidates), 2)
+                for item in candidates:
+                    self.assertEqual(item["annotations"].get("helm.sh/resource-policy"), "keep")
+                    self.assertEqual(item["labels"].get("app.kubernetes.io/instance"), "parser-repro")
+                self.assertNotRegex(fixture.read_text(), r"(?m)^\s+(?:data|stringData):")
+
+    def test_invalid_metadata_stays_invalid_after_later_valid_map(self):
+        manifest = render(self.manifest_resources)
+        manifest = manifest.replace(
+            "  annotations:\n    helm.sh/resource-policy: keep\n", "", 2
+        ).replace(
+            "  labels:\n", "  annotations: {unsupported: value}\n  labels:\n"
+        )
+        self.state["manifest"] = manifest
+        self.write_state()
+        result = self.run_script("--helm-release", "pacman", "--delete-data")
+        state = self.read_state()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(state["helm_calls"], [])
+        self.assertIn("PersistentVolumeClaim/pacman-mongo", state["objects"])
+        self.assertIn("Secret/pacman-mongo", state["objects"])
 
     def test_normal_mode_rejects_unretained_legacy_data_before_uninstall(self):
         self.secret["annotations"] = {}
@@ -318,6 +378,74 @@ class HelmUninstallTests(unittest.TestCase):
         result = self.run_script("--helm-release", "pacman", "--delete-data")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.read_state()["helm_calls"], [])
+
+    def test_live_candidates_require_both_helm_release_annotations(self):
+        for annotations in (
+            {"helm.sh/resource-policy": "keep"},
+            {"helm.sh/resource-policy": "keep", "meta.helm.sh/release-name": "pacman"},
+            {"helm.sh/resource-policy": "keep", "meta.helm.sh/release-namespace": "helm-test"},
+            {"helm.sh/resource-policy": "keep", "meta.helm.sh/release-name": "other-release",
+             "meta.helm.sh/release-namespace": "helm-test"},
+        ):
+            with self.subTest(annotations=sorted(annotations)):
+                self.setUpStateForSubtest()
+                self.state["objects"]["Secret/pacman-mongo"]["metadata"]["annotations"] = annotations
+                self.write_state()
+                result = self.run_script("--helm-release", "pacman", "--delete-data")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.read_state()["helm_calls"], [])
+                self.assertIn("Secret/pacman-mongo", self.read_state()["objects"])
+
+    def test_smoke_query_failure_stops_before_install(self):
+        fake_bin = self.directory / "smoke-bin"
+        fake_bin.mkdir()
+        kubectl_log = self.directory / "smoke-kubectl.log"
+        helm_log = self.directory / "smoke-helm.log"
+        (fake_bin / "kubectl").write_text(r'''#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+with pathlib.Path(os.environ['SMOKE_KUBECTL_LOG']).open('a') as log:
+    log.write(' '.join(args) + '\n')
+if args[:2] == ['config', 'current-context']:
+    print('kind-pacman-helm-cleanup')
+elif args[:2] == ['config', 'view']:
+    print('https://127.0.0.1:65535')
+elif 'nodes' in args:
+    print(json.dumps({'items':[{'metadata':{'name':'pacman-helm-cleanup-control-plane'},
+        'status':{'nodeInfo':{'architecture':'arm64'}}}]}))
+elif 'namespace' in args:
+    print('simulated Kubernetes query failure', file=sys.stderr)
+    raise SystemExit(23)
+else:
+    raise SystemExit(24)
+''')
+        (fake_bin / "helm").write_text(r'''#!/usr/bin/env python3
+import os, pathlib, sys
+with pathlib.Path(os.environ['SMOKE_HELM_LOG']).open('a') as log:
+    log.write(' '.join(sys.argv[1:]) + '\n')
+raise SystemExit(19)
+''')
+        (fake_bin / "rg").write_text("#!/bin/sh\nexit 127\n")
+        for name in ("kubectl", "helm", "rg"):
+            (fake_bin / name).chmod(0o755)
+        env = {
+            **os.environ,
+            "PATH": str(fake_bin) + os.pathsep + os.environ["PATH"],
+            "KUBECONFIG": str(self.directory / "fake-kubeconfig"),
+            "PACMAN_HELM_TEST_CONTEXT": "kind-pacman-helm-cleanup",
+            "SMOKE_KUBECTL_LOG": str(kubectl_log),
+            "SMOKE_HELM_LOG": str(helm_log),
+        }
+        result = subprocess.run(
+            ["bash", str(ROOT / "tests/helm-uninstall-smoke.sh")],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("get namespace", kubectl_log.read_text())
+        self.assertFalse(helm_log.exists(), "smoke fixture must not install after a failed query")
 
     def test_raw_mode_rejects_helm_flag_mixing_without_helm_calls(self):
         for args in (("--delete-data",), ("keeppvc", "--helm-release", "pacman")):

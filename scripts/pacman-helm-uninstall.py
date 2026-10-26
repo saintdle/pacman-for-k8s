@@ -80,6 +80,20 @@ def scalar(value):
     return value
 
 
+def mapping_entry(line, indentation):
+    key_syntax = r"(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^']|'')*'|[A-Za-z0-9_./-]+)"
+    match = re.fullmatch(
+        " " * indentation + "(" + key_syntax + r"):[ \t]*(.*?)[ \t]*(?:#.*)?",
+        line,
+    )
+    if not match:
+        return None
+    key = scalar(match.group(1))
+    if not isinstance(key, str) or not key:
+        return None
+    return key, match.group(2)
+
+
 def parse_manifest(manifest):
     """Read only top-level Kubernetes identity and metadata from rendered YAML."""
     resources = []
@@ -106,6 +120,8 @@ def parse_manifest(manifest):
         name = None
         labels = {}
         annotations = {}
+        invalid_metadata = False
+        metadata_sections_seen = set()
         metadata_end = len(lines)
         for i in range(metadata_start, len(lines)):
             line = lines[i]
@@ -117,16 +133,20 @@ def parse_manifest(manifest):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
             if line.startswith("  ") and not line.startswith("    "):
-                field = re.fullmatch(r"  ([A-Za-z0-9_./-]+):[ \t]*(.*?)[ \t]*(?:#.*)?", line)
+                field = mapping_entry(line, 2)
                 if not field:
                     fail("Could not parse resource metadata in the Helm manifest")
-                key, value = field.groups()
+                key, value = field
                 if key == "name":
                     name = scalar(value)
                     section = None
                 elif key in ("labels", "annotations"):
+                    if key in metadata_sections_seen:
+                        invalid_metadata = True
+                    metadata_sections_seen.add(key)
                     if value:
                         if value not in ("{}", "null"):
+                            invalid_metadata = True
                             section = "invalid"
                         else:
                             section = None
@@ -136,17 +156,26 @@ def parse_manifest(manifest):
                     section = None
                 continue
             if line.startswith("    "):
-                field = re.fullmatch(r"    ([A-Za-z0-9_./-]+):[ \t]*(.*?)[ \t]*(?:#.*)?", line)
+                field = mapping_entry(line, 4)
                 if not field:
                     if section in ("labels", "annotations"):
+                        invalid_metadata = True
                         section = "invalid"
                     continue
-                key, value = field.groups()
+                key, value = field
                 if section == "labels":
                     parsed = scalar(value)
+                    if parsed is None or key in labels:
+                        invalid_metadata = True
+                        section = "invalid"
+                        continue
                     labels[key] = parsed
                 elif section == "annotations":
                     parsed = scalar(value)
+                    if parsed is None or key in annotations:
+                        invalid_metadata = True
+                        section = "invalid"
+                        continue
                     annotations[key] = parsed
                 elif section == "invalid":
                     # Flow-style metadata is not interpreted as ownership proof.
@@ -154,7 +183,7 @@ def parse_manifest(manifest):
         if kind in ("PersistentVolumeClaim", "Secret", "Namespace"):
             if not name or not re.fullmatch(r"[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?", name):
                 fail(f"Could not safely identify a Helm-managed {kind} name")
-            if "invalid" in (section,):
+            if invalid_metadata:
                 fail(f"Could not safely parse Helm-managed {kind} metadata")
         resources.append({"kind": kind, "name": name, "labels": labels, "annotations": annotations})
     return resources
@@ -232,7 +261,7 @@ def validate_live(resource, obj, release, namespace, chart_label):
         fail(f"Refusing {resource['kind']} {resource['name']}: Helm ownership is unverified")
     annotations = metadata.get("annotations") or {}
     for key, value in (("meta.helm.sh/release-name", release), ("meta.helm.sh/release-namespace", namespace)):
-        if key in annotations and annotations[key] != value:
+        if annotations.get(key) != value:
             fail(f"Refusing {resource['kind']} {resource['name']}: Helm ownership conflicts")
     if not metadata.get("uid") or not metadata.get("resourceVersion"):
         fail(f"Refusing {resource['kind']} {resource['name']}: Kubernetes UID is unavailable")

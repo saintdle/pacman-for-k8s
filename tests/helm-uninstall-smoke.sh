@@ -22,7 +22,9 @@ PY
 suffix=$(python3 -c 'import secrets; print(secrets.token_hex(4))')
 namespace="helm-cleanup-$suffix"
 release="pacman-cleanup-$suffix"
-if kubectl --context "$PACMAN_HELM_TEST_CONTEXT" get namespace "$namespace" --ignore-not-found -o name | rg -q .; then
+existing_namespace=$(kubectl --context "$PACMAN_HELM_TEST_CONTEXT" get namespace "$namespace" \
+  --ignore-not-found -o name)
+if [[ -n "$existing_namespace" ]]; then
   echo 'Generated fixture namespace already exists' >&2; exit 1
 fi
 fixture_dir=$(mktemp -d)
@@ -54,7 +56,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     helm.sh/chart: pacman-1.2.3
   annotations:
-    helm.sh/resource-policy: keep
+    "helm.sh/resource-policy": keep
 spec:
   accessModes: [ReadWriteOnce]
   resources:
@@ -72,7 +74,7 @@ metadata:
     app.kubernetes.io/managed-by: Helm
     helm.sh/chart: pacman-1.2.3
   annotations:
-    helm.sh/resource-policy: keep
+    "helm.sh/resource-policy": keep
 type: Opaque
 stringData:
   fixture: harmless-test-value
@@ -91,8 +93,9 @@ status=$(helm --kube-context "$PACMAN_HELM_TEST_CONTEXT" list --all --namespace 
 [[ "$status" == uninstalled ]] || { echo 'Helm history was not retained' >&2; exit 1; }
 
 NAMESPACE="$namespace" ./pacman-uninstall.sh --helm-release "$release" --delete-data
-if kubectl --context "$PACMAN_HELM_TEST_CONTEXT" -n "$namespace" get pvc/"$release-data" secret/"$release-generated" \
-  --ignore-not-found -o name | rg -q .; then
+remaining_data=$(kubectl --context "$PACMAN_HELM_TEST_CONTEXT" -n "$namespace" \
+  get pvc/"$release-data" secret/"$release-generated" --ignore-not-found -o name)
+if [[ -n "$remaining_data" ]]; then
   echo 'Generated data resources remain after explicit cleanup' >&2; exit 1
 fi
 kubectl --context "$PACMAN_HELM_TEST_CONTEXT" -n "$namespace" get secret/"$release-user-secret" -o name >/dev/null
