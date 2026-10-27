@@ -142,6 +142,7 @@ jobs:
           git diff --check
 
       - name: Install kubeconform
+        if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
         run: |
           set -euo pipefail
           version=v0.8.0
