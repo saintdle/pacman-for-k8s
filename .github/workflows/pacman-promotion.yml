@@ -141,6 +141,20 @@ jobs:
           node tools/pacman-promotion.mjs check-references
           git diff --check
 
+      - name: Install kubeconform
+        if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
+        run: |
+          set -euo pipefail
+          version=v0.8.0
+          base="https://github.com/yannh/kubeconform/releases/download/${version}"
+          cd /tmp
+          curl -fsSLO "${base}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSLO "${base}/CHECKSUMS"
+          grep ' kubeconform-linux-amd64.tar.gz$' CHECKSUMS | sha256sum --check
+          tar -xzf kubeconform-linux-amd64.tar.gz kubeconform
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+
       - name: Validate manifests and references
         if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
         run: |
