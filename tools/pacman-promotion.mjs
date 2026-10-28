@@ -384,6 +384,7 @@ export function assertManagedConsumerReferences({ state, compatibilityLock = nul
   const readmeChart = [...files.get('README.md').matchAll(/raw manifests use app `([^`]+)`, matching chart `([^`]+)`/g)];
   if (readmeChart.length !== 1 || readmeChart[0][2] !== state.chart.version) fail(`README.md chart version does not match promotion state ${state.chart.version}`);
   checkVersion('README.md', /Use `--version ([^`]+)` to reproduce the app\/chart pair above\./g, state.chart.version, 'Helm version');
+  checkVersion('README.md', /^Chart `([^`]+)` defaults to an all-in-one app and Service port `80`\./gm, state.chart.version, 'current chart defaults version');
   checkVersion('cilium-demos/fault-demo/README.md', /published Pac-Man chart `([^`]+)`/g, state.chart.version, 'chart version');
   checkVersion('cilium-demos/fault-demo/README.md', /releases\/tag\/pacman-([^)\s]+)/g, state.chart.version, 'chart release tag');
   checkVersion('cilium-demos/fault-demo/README.md', /^export CHART_VERSION=([^\s]+)$/gm, state.chart.version, 'CHART_VERSION');
@@ -400,6 +401,12 @@ export function assertManagedConsumerReferences({ state, compatibilityLock = nul
 function readManagedConsumerReferences() {
   const paths = [...new Set([...MANAGED_IMAGE_REFERENCE_PATHS, ...MANAGED_VERSION_REFERENCE_PATHS])];
   return paths.map((path) => ({ path, content: readFileSync(path, 'utf8') }));
+}
+function replaceManagedVersionPin(content, path, name, pattern, oldVersion, newVersion) {
+  const matches = [...content.matchAll(pattern)];
+  if (matches.length !== 1) fail(matches.length ? `${path} must declare its managed ${name} exactly once` : `expected documented ${name} is missing from ${path}`);
+  if (matches[0][2] !== oldVersion) fail(`documented ${name} in ${path} does not match expected version ${oldVersion}`);
+  return content.replace(pattern, (_match, prefix, _version, suffix) => `${prefix}${newVersion}${suffix}`);
 }
 async function selectLatestChart() {
   const releases = await (await api(`/repos/${chartRepo}/releases?per_page=100`)).json();
@@ -476,16 +483,37 @@ async function main() {
     const oldApp = process.env.DOC_OLD_APP_VERSION, newApp = process.env.DOC_NEW_APP_VERSION;
     const oldChart = process.env.DOC_OLD_CHART_VERSION, newChart = process.env.DOC_NEW_CHART_VERSION;
     const oldDigest = process.env.DOC_OLD_IMAGE_DIGEST, newDigest = process.env.DOC_NEW_IMAGE_DIGEST;
+    const updatedDocs = new Map();
+    const readDoc = (path) => updatedDocs.has(path) ? updatedDocs.get(path) : readFileSync(path, 'utf8');
+    const updateDoc = (path, update) => updatedDocs.set(path, update(readDoc(path)));
+    if (oldApp && newApp && oldApp !== newApp) {
+      const path = 'README.md';
+      updateDoc(path, (before) => replaceManagedVersionPin(before, path, 'app version', /(raw manifests use app `)([^`]+)(`, matching chart `[^`]+`)/g, oldApp, newApp));
+    }
+    if (oldChart && newChart && oldChart !== newChart) {
+      const readmePath = 'README.md';
+      updateDoc(readmePath, (before) => replaceManagedVersionPin(before, readmePath, 'chart version', /(raw manifests use app `[^`]+`, matching chart `)([^`]+)(`)/g, oldChart, newChart));
+      updateDoc(readmePath, (before) => replaceManagedVersionPin(before, readmePath, 'Helm version', /(Use `--version )([^`]+)(` to reproduce the app\/chart pair above\.)/g, oldChart, newChart));
+      updateDoc(readmePath, (before) => replaceManagedVersionPin(before, readmePath, 'current chart defaults version', /^(Chart `)([^`]+)(` defaults to an all-in-one app and Service port `80`\.)/gm, oldChart, newChart));
+      const faultDemoPath = 'cilium-demos/fault-demo/README.md';
+      for (const [name, pattern] of [
+        ['chart version', /(published Pac-Man chart `)([^`]+)(`)/g],
+        ['chart release tag', /(releases\/tag\/pacman-)([^)\s]+)(\))/g],
+        ['CHART_VERSION', /^(export CHART_VERSION=)([^\s]+)()$/gm],
+      ]) {
+        updateDoc(faultDemoPath, (before) => replaceManagedVersionPin(before, faultDemoPath, name, pattern, oldChart, newChart));
+      }
+    }
     for (const [path, oldValue, newValue] of [
-      ['README.md', oldApp, newApp], ['README.md', oldChart, newChart], ['README.md', oldDigest, newDigest],
-      ['cilium-demos/fault-demo/README.md', oldChart, newChart],
+      ['README.md', oldDigest, newDigest],
       ['cilium-demos/README.md', oldDigest, newDigest], ['cilium-demos/scripts/deploy-demo.sh', oldDigest, newDigest],
     ]) {
       if (!oldValue || !newValue || oldValue === newValue) continue;
-      const before = readFileSync(path, 'utf8');
+      const before = readDoc(path);
       if (!before.includes(oldValue)) fail(`expected documented pin is missing from ${path}`);
-      writeFileSync(path, before.split(oldValue).join(newValue));
+      updatedDocs.set(path, before.split(oldValue).join(newValue));
     }
+    for (const [path, content] of updatedDocs) writeFileSync(path, content);
     return;
   }
   if (command === 'verify-assets') {
