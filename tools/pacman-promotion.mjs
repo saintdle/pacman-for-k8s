@@ -229,16 +229,16 @@ async function generatedChartCandidate({ recordAsset, releaseData, packageAsset,
       package_sha256: packageAsset.checksum, source_repository: record.source.repository, source_commit: record.source.commit, format: 'chart-release-v1' },
   };
 }
-async function verifyPublishedConsumerReadiness(releaseData, candidate) {
+async function verifyPublishedConsumerReadiness(releaseData, candidate, { getVerifiedAsset = verifiedAsset } = {}) {
   const lockName = 'consumer-compatibility-lock.json';
   const expectedLockUrl = releaseAssetUrl(chartRepo, releaseData.tag_name, lockName);
   const lockMetadata = asset(releaseData, lockName);
   if (lockMetadata.browser_download_url !== expectedLockUrl) fail('compatibility lock reference is not immutable');
   if (!digestRe.test(lockMetadata.digest ?? '')) fail('compatibility lock release digest is missing or invalid');
-  const lockAsset = await verifiedAsset(releaseData, lockName);
-  if (lockAsset.url !== expectedLockUrl) fail('compatibility lock reference is not immutable');
+  const lock = await getVerifiedAsset(releaseData, lockName);
+  if (lock.url !== expectedLockUrl) fail('compatibility lock reference is not immutable');
   let compatibilityLock;
-  try { compatibilityLock = JSON.parse(lockAsset.data.toString()); }
+  try { compatibilityLock = JSON.parse(lock.data.toString()); }
   catch { fail('compatibility lock is malformed JSON'); }
   if (!isDeepStrictEqual(compatibilityLock, makeCompatibilityLock(candidate))) {
     fail('compatibility lock does not match verified app and chart identities');
@@ -264,6 +264,9 @@ async function verifyPublishedConsumerReadiness(releaseData, candidate) {
 function hasModernAppReleaseSignals(releaseData, metadata) {
   return releaseData.assets.some((item) => item.name === 'app-release-record.json')
     || ['app_record_ref', 'app_record_sha256'].some((key) => Object.hasOwn(metadata, key));
+}
+function hasModernChartReleaseSignals(releaseData) {
+  return releaseData.assets.some((item) => item.name === 'consumer-compatibility-lock.json');
 }
 async function verifyApp(versionValue, expectedRef, expectedSha, expectedDigest) {
   version(versionValue, 'app version');
@@ -293,6 +296,7 @@ async function verifyApp(versionValue, expectedRef, expectedSha, expectedDigest)
   const legacy = await verifiedAsset(rel, 'release-metadata.json');
   if (legacy.url !== expectedRef || legacy.checksum !== expectedSha) fail('legacy app metadata reference/checksum mismatch');
   const metadata = JSON.parse(legacy.data.toString());
+  if (hasModernAppReleaseSignals(rel, metadata)) fail('modern app signals cannot be verified through legacy release metadata');
   if (metadata.version !== versionValue || metadata.tag !== tag || !commitRe.test(metadata.commit)) fail('legacy app metadata identity is invalid');
   const imageDigest = expectedDigest ?? /(?:^|\n)- Digest: (sha256:[a-f0-9]{64})(?:\n|$)/.exec(rel.body ?? '')?.[1];
   if (!digestRe.test(imageDigest ?? '')) fail('legacy app image digest has no verifiable release evidence');
@@ -358,6 +362,9 @@ export async function rollbackCandidate(options = {}) {
   const appVersion = versionFromAsset(selectedAppRef);
   if (appVersion !== metadata.appVersion) fail('rollback app target does not match chart package appVersion');
   const app = await verifyAppRelease(appVersion, selectedAppRef, selectedAppSha, metadata.imageDigest);
+  if (recordAsset) await verifyPublishedConsumerReadiness(rel, { app, chart }, { getVerifiedAsset });
+  else if (app.format === 'app-release-v1') fail('chart release record is missing for a modern app release');
+  else if (hasModernChartReleaseSignals(rel)) fail('chart release record is missing for a modern chart release');
   return { app, chart, reason };
 }
 export function makeCompatibilityLock(candidate) {
@@ -469,6 +476,7 @@ async function selectLatestChart() {
     const appMeta = await verifiedAsset(appRelease, 'release-metadata.json');
     const appMetadata = JSON.parse(appMeta.data.toString());
     if (hasModernAppReleaseSignals(appRelease, appMetadata)) fail('chart release record is missing for a modern app release');
+    if (hasModernChartReleaseSignals(rel)) fail('chart release record is missing for a modern chart release');
     const app = await verifyApp(metadata.appVersion, appMeta.url, appMeta.checksum, metadata.imageDigest);
     return { app, chart: { version: chartVersion, reference: packageAsset.url, sha256: packageAsset.checksum,
       package_reference: packageAsset.url, package_sha256: packageAsset.checksum, source_repository: `https://github.com/${chartRepo}`,
