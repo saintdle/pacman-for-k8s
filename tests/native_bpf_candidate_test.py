@@ -1,3 +1,4 @@
+import copy
 import json
 import tempfile
 import unittest
@@ -14,10 +15,41 @@ from native_bpf_candidate import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_PROMOTION_STATE = {
+    "schema_version": 1,
+    "kind": "pacman-k8s-promotion-state",
+    "mode": "automatic",
+    "app": {
+        "version": "0.7.16",
+        "reference": "https://github.com/saintdle/pacman/releases/download/pacman-v0.7.16/release-metadata.json",
+        "sha256": "ef15decce2fc0cb9aa0b14d4a2d059e10eb13638afc57fe99277b8688aea4c4e",
+        "source_commit": "13f04d6e6aea62f1d32d57d90e4eff786083c02e",
+        "source_repository": "https://github.com/saintdle/pacman",
+        "image_repository": "docker.io/saintdle/pacman",
+        "image_manifest_list_digest": "sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf",
+        "format": "legacy-release-metadata-v0",
+        "missing_evidence": ["app-release-record", "platform-descriptors", "provenance", "signature"],
+    },
+    "chart": {
+        "version": "0.7.17",
+        "reference": "https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.17/pacman-0.7.17.tgz",
+        "sha256": "b0722ab17320afe14d5bee5ebf25ed26c9dcfa59f24e238764c4b2d8a76eb971",
+        "package_reference": "https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.17/pacman-0.7.17.tgz",
+        "package_sha256": "b0722ab17320afe14d5bee5ebf25ed26c9dcfa59f24e238764c4b2d8a76eb971",
+        "source_repository": "https://github.com/saintdle/helm-charts",
+        "source_commit": "1d11684428b2069aef8d4e69c37237b5b3c910a5",
+        "format": "legacy-chart-package-v0",
+        "missing_evidence": ["chart-release-record", "chart-source-identity"],
+    },
+}
+
+
+def write_legacy_state(root: Path) -> None:
+    (root / "pacman-promotion-state.json").write_text(json.dumps(LEGACY_PROMOTION_STATE), encoding="utf-8")
 
 
 def valid_lock():
-    state = json.loads((ROOT / "pacman-promotion-state.json").read_text(encoding="utf-8"))
+    state = LEGACY_PROMOTION_STATE
     app = state["app"]
     chart = state["chart"]
     return {
@@ -50,7 +82,10 @@ def valid_lock():
 
 class CandidateResolutionTest(unittest.TestCase):
     def test_legacy_state_is_explicit_and_keeps_missing_evidence(self):
-        candidate = load_candidate(ROOT)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_legacy_state(root)
+            candidate = load_candidate(root)
         self.assertEqual(candidate["format"], "legacy-promotion-state")
         self.assertIn("app-release-record", candidate["missing_evidence"])
         self.assertIn("chart-release-record", candidate["missing_evidence"])
@@ -60,7 +95,7 @@ class CandidateResolutionTest(unittest.TestCase):
     def test_present_invalid_lock_fails_closed_instead_of_falling_back(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "pacman-promotion-state.json").write_text((ROOT / "pacman-promotion-state.json").read_text())
+            write_legacy_state(root)
             (root / "consumer-compatibility-lock.json").write_text("{invalid")
             with self.assertRaisesRegex(ValueError, "present consumer compatibility lock"):
                 load_candidate(root)
@@ -97,18 +132,29 @@ class CandidateResolutionTest(unittest.TestCase):
                     load_candidate(root)
 
     def test_legacy_mutable_image_and_incomplete_missing_evidence_fail(self):
-        state = json.loads((ROOT / "pacman-promotion-state.json").read_text(encoding="utf-8"))
         for mutation, message in (
             (lambda item: item["app"].update(image_manifest_list_digest="latest"), "manifest-list digest"),
             (lambda item: item["app"].update(missing_evidence=["app-release-record"]), "missing evidence"),
         ):
             with self.subTest(message=message), tempfile.TemporaryDirectory() as directory:
+                state = copy.deepcopy(LEGACY_PROMOTION_STATE)
                 mutation(state)
                 root = Path(directory)
                 (root / "pacman-promotion-state.json").write_text(json.dumps(state))
                 with self.assertRaisesRegex(ValueError, message):
                     load_candidate(root)
-                state = json.loads((ROOT / "pacman-promotion-state.json").read_text(encoding="utf-8"))
+
+    def test_tracked_candidate_resolves_its_current_state_and_optional_lock(self):
+        state = json.loads((ROOT / "pacman-promotion-state.json").read_text(encoding="utf-8"))
+        candidate = load_candidate(ROOT)
+        self.assertEqual(candidate["app"]["version"], state["app"]["version"])
+        self.assertEqual(candidate["chart"]["version"], state["chart"]["version"])
+        if (ROOT / "consumer-compatibility-lock.json").exists():
+            self.assertEqual(candidate["format"], "consumer-compatibility-lock")
+            self.assertEqual(candidate["missing_evidence"], [])
+        else:
+            self.assertEqual(candidate["format"], "legacy-promotion-state")
+            self.assertIn("app-release-record", candidate["missing_evidence"])
 
 
 class CandidateArtifactTest(unittest.TestCase):
@@ -173,12 +219,17 @@ class CandidateArtifactTest(unittest.TestCase):
         candidate = load_candidate(ROOT)
         verify_chart_contents(
             candidate,
-            "name: pacman\nversion: 0.7.17\nappVersion: \"0.7.16\"\n",
-            "image:\n  repository: docker.io/saintdle/pacman\n  digest: "
-            + candidate["app"]["image_manifest_list_digest"] + "\n",
+            f"name: pacman\nversion: {candidate['chart']['version']}\nappVersion: \"{candidate['app']['version']}\"\n",
+            f"image:\n  repository: {candidate['app']['image_repository']}\n"
+            f"  digest: {candidate['app']['image_manifest_list_digest']}\n",
         )
         with self.assertRaisesRegex(ValueError, "appVersion"):
-            verify_chart_contents(candidate, "name: pacman\nversion: 0.7.17\nappVersion: 0.7.15\n", "image:\n  digest: x\n")
+            wrong_app_version = "9.9.9" if candidate["app"]["version"] != "9.9.9" else "9.9.8"
+            verify_chart_contents(
+                candidate,
+                f"name: pacman\nversion: {candidate['chart']['version']}\nappVersion: {wrong_app_version}\n",
+                "image:\n  digest: x\n",
+            )
 
     def test_pod_accepts_captured_list_id_only_with_verified_cri_mapping(self):
         candidate = load_candidate(ROOT)
