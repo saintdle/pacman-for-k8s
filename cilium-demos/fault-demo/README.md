@@ -23,8 +23,8 @@ Install Git, Docker, kind, kubectl, Helm, the Cilium and Hubble CLIs, curl, and
 OpenSSL. Run commands from the root of this repository, in Bash.
 
 The released app image `0.7.16` contains the gated fault and synthetic
-security-probe runtime. The published Pac-Man chart `0.7.17` from the
-[versioned chart release](https://github.com/saintdle/helm-charts/releases/tag/pacman-0.7.17)
+security-probe runtime. The published Pac-Man chart `0.7.20` from the
+[versioned chart release](https://github.com/saintdle/helm-charts/releases/tag/pacman-0.7.20)
 exposes its opt-in controls. The commands below build a local Kind image from
 the exact app release source and pull the versioned chart. This local rebuild is for the walkthrough's
 `pullPolicy: Never`; it does not reproduce the published image digest or
@@ -57,7 +57,7 @@ LAB_DIR="$(mktemp -d)"
 export LAB_DIR
 export APP_REVISION=13f04d6e6aea62f1d32d57d90e4eff786083c02e
 export APP_IMAGE=pacman-manual-demo:13f04d6e
-export CHART_VERSION=0.7.17
+export CHART_VERSION=0.7.20
 
 git clone https://github.com/saintdle/pacman.git "$LAB_DIR/app"
 git -C "$LAB_DIR/app" checkout --detach "$APP_REVISION"

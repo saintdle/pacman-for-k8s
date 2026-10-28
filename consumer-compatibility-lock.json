@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "kind": "consumer-compatibility-lock",
+  "app": {
+    "version": "0.7.17",
+    "reference": "https://github.com/saintdle/pacman/releases/download/pacman-v0.7.17/app-release-record.json",
+    "sha256": "8fc0922b7f46a30b4ed15e025ed99381b8c21723072e25c701e68e7b45564737",
+    "source_repository": "https://github.com/saintdle/pacman",
+    "source_commit": "776bc7d98003ea2361ef8ee84e624da2a63f8f08",
+    "image_repository": "docker.io/saintdle/pacman",
+    "image_manifest_list_digest": "sha256:2a55f4d74bc05dea3ae05912fbdcbe9348f9aafb752902054a7f066cfa112f68"
+  },
+  "chart": {
+    "version": "0.7.20",
+    "reference": "https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.20/chart-release-record.json",
+    "sha256": "75698e5320b948caa7411f8f2a4b1b011860248fc2302cfb95441fa39511350c",
+    "package_reference": "https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.20/pacman-0.7.20.tgz",
+    "package_sha256": "07544a4b0d1279d2310a61f065140a2a5c6b12d13ca45017f920188990dd6e58",
+    "source_repository": "https://github.com/saintdle/pacman",
+    "source_commit": "a405d8d66d63c8d121ed993f55583a6ff634c86d"
+  },
+  "supported_evidence_lanes": [
+    "app-manifest-list",
+    "app-platform-descriptors",
+    "app-provenance",
+    "app-signature",
+    "chart-package-sha256"
+  ]
+}

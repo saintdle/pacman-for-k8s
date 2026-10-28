@@ -7,7 +7,7 @@ if [[ "$DEMO" == microservices-east-west ]]; then
 else
   NAMESPACE="${NAMESPACE:-pacman-demo}"
 fi
-PACMAN_IMAGE="${PACMAN_IMAGE:-docker.io/saintdle/pacman@sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf}"
+PACMAN_IMAGE="${PACMAN_IMAGE:-docker.io/saintdle/pacman@sha256:2a55f4d74bc05dea3ae05912fbdcbe9348f9aafb752902054a7f066cfa112f68}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 [[ "$DEMO" =~ ^[a-z0-9-]+$ && -d "$ROOT/$DEMO" ]] || { echo "Unknown demo" >&2; exit 1; }
 if [[ ${#NAMESPACE} -gt 63 || ! "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
