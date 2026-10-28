@@ -1,7 +1,7 @@
 database: postgres
 image:
   repository: pacman-manual-demo
-  tag: "991ba385"
+  tag: "13f04d6e"
   digest: ""
   pullPolicy: Never
 fullnameOverride: pacman-fault

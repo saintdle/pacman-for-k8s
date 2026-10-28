@@ -67,6 +67,7 @@ helm pull pacman-charts/pacman --version "$CHART_VERSION" --untar --untardir "$L
 export CHART="$LAB_DIR/pacman"
 
 docker build -f "$LAB_DIR/app/docker/Dockerfile" \
+  --build-arg APP_VERSION=0.7.16 \
   --build-arg COMMIT_SHA="$APP_REVISION" -t "$APP_IMAGE" "$LAB_DIR/app"
 CILIUM_VERSION=1.19.4 ./cilium-demos/scripts/setup-single-kind.sh
 kind load docker-image "$APP_IMAGE" --name "$CLUSTER_NAME"
