@@ -13,13 +13,13 @@
     "format": "app-release-v1"
   },
   "chart": {
-    "version": "0.7.20",
-    "reference": "https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.20/chart-release-record.json",
-    "sha256": "75698e5320b948caa7411f8f2a4b1b011860248fc2302cfb95441fa39511350c",
-    "package_reference": "https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.20/pacman-0.7.20.tgz",
-    "package_sha256": "07544a4b0d1279d2310a61f065140a2a5c6b12d13ca45017f920188990dd6e58",
+    "version": "0.7.21",
+    "reference": "https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.21/chart-release-record.json",
+    "sha256": "e707a058d26de92d7ddf648dcf2d9b46fd222e3631d037215e970b9c885723c6",
+    "package_reference": "https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.21/pacman-0.7.21.tgz",
+    "package_sha256": "4fbf61345cf95b16b7cc715a8b2c7cd2c8fe2d5d7b065564ee430ea7763a6a52",
     "source_repository": "https://github.com/saintdle/pacman",
-    "source_commit": "a405d8d66d63c8d121ed993f55583a6ff634c86d",
+    "source_commit": "3f0073a38b66c6069d96a28e1a141d5fa63de577",
     "format": "chart-release-v1"
   }
 }
