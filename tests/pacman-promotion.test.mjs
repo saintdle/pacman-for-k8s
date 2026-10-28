@@ -109,6 +109,75 @@ function managedReferences(state) {
   });
 }
 
+function updateDocsFixture({ oldApp, newApp, oldChart, newChart, missingChartEnvPin = false }) {
+  const directory = mkdtempSync(join(tmpdir(), 'pacman-update-docs-'));
+  const oldDigest = `sha256:${'a'.repeat(64)}`;
+  const newDigest = `sha256:${'b'.repeat(64)}`;
+  const docs = {
+    'README.md': `The raw manifests use app \`${oldApp}\`, matching chart \`${oldChart}\`, with all three\nroles pinned to \`docker.io/saintdle/pacman@${oldDigest}\`.\n\nnamespace. Use \`--version ${oldChart}\` to reproduce the app/chart pair above.\n\nExample release: app \`${oldApp}\`, chart \`${oldChart}\`.\n`,
+    'cilium-demos/fault-demo/README.md': `The published Pac-Man chart \`${oldChart}\` from the\n[versioned chart release](https://github.com/saintdle/helm-charts/releases/tag/pacman-${oldChart})\n${missingChartEnvPin ? '' : `export CHART_VERSION=${oldChart}\n`}\nExample chart release: \`${oldChart}\`.\n`,
+    'cilium-demos/README.md': `Default image: \`docker.io/saintdle/pacman@${oldDigest}\`.\n`,
+    'cilium-demos/scripts/deploy-demo.sh': `PACMAN_IMAGE="\${PACMAN_IMAGE:-docker.io/saintdle/pacman@${oldDigest}}"\n`,
+  };
+  for (const [path, content] of Object.entries(docs)) {
+    const fullPath = join(directory, path);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, content);
+  }
+  const result = spawnSync(process.execPath, [promotionCli, 'update-docs'], {
+    cwd: directory,
+    encoding: 'utf8',
+    env: { ...process.env,
+      DOC_OLD_APP_VERSION: oldApp, DOC_NEW_APP_VERSION: newApp,
+      DOC_OLD_CHART_VERSION: oldChart, DOC_NEW_CHART_VERSION: newChart,
+      DOC_OLD_IMAGE_DIGEST: oldDigest, DOC_NEW_IMAGE_DIGEST: newDigest },
+  });
+  const updatedDocs = Object.fromEntries(Object.keys(docs).map((path) => [path, readFileSync(join(directory, path), 'utf8')]));
+  rmSync(directory, { recursive: true, force: true });
+  return { ...result, docs: updatedDocs, initialDocs: docs, oldDigest, newDigest };
+}
+
+test('update-docs keeps app and chart pins independent when the new app version equals the old chart version', () => {
+  const result = updateDocsFixture({ oldApp: '0.7.16', newApp: '0.7.17', oldChart: '0.7.17', newChart: '0.7.20' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.docs['README.md'], /raw manifests use app `0\.7\.17`, matching chart `0\.7\.20`/);
+  assert.match(result.docs['README.md'], /--version 0\.7\.20` to reproduce/);
+  assert.match(result.docs['cilium-demos/fault-demo/README.md'], /published Pac-Man chart `0\.7\.20`/);
+  assert.match(result.docs['cilium-demos/fault-demo/README.md'], /releases\/tag\/pacman-0\.7\.20/);
+  assert.match(result.docs['cilium-demos/fault-demo/README.md'], /export CHART_VERSION=0\.7\.20/);
+  assert.match(result.docs['README.md'], /Example release: app `0\.7\.16`, chart `0\.7\.17`/);
+  assert.match(result.docs['cilium-demos/fault-demo/README.md'], /Example chart release: `0\.7\.17`/);
+  for (const path of ['README.md', 'cilium-demos/README.md', 'cilium-demos/scripts/deploy-demo.sh']) {
+    assert.ok(result.docs[path].includes(result.newDigest), `${path} should contain the new digest`);
+    assert.ok(!result.docs[path].includes(result.oldDigest), `${path} should not retain the old digest`);
+  }
+});
+
+test('update-docs handles identical old app and chart versions with different new versions', () => {
+  const result = updateDocsFixture({ oldApp: '0.7.16', newApp: '0.7.18', oldChart: '0.7.16', newChart: '0.7.19' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.docs['README.md'], /raw manifests use app `0\.7\.18`, matching chart `0\.7\.19`/);
+  assert.match(result.docs['README.md'], /--version 0\.7\.19` to reproduce/);
+  assert.match(result.docs['README.md'], /Example release: app `0\.7\.16`, chart `0\.7\.16`/);
+  assert.match(result.docs['cilium-demos/fault-demo/README.md'], /export CHART_VERSION=0\.7\.19/);
+  assert.match(result.docs['cilium-demos/fault-demo/README.md'], /Example chart release: `0\.7\.16`/);
+});
+
+test('update-docs leaves an unchanged version axis intact while updating the other axis', () => {
+  const result = updateDocsFixture({ oldApp: '0.7.16', newApp: '0.7.18', oldChart: '0.7.19', newChart: '0.7.19' });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.docs['README.md'], /raw manifests use app `0\.7\.18`, matching chart `0\.7\.19`/);
+  assert.match(result.docs['README.md'], /--version 0\.7\.19` to reproduce/);
+  assert.match(result.docs['cilium-demos/fault-demo/README.md'], /export CHART_VERSION=0\.7\.19/);
+});
+
+test('update-docs fails when an expected managed version pin is missing', () => {
+  const result = updateDocsFixture({ oldApp: '0.7.16', newApp: '0.7.18', oldChart: '0.7.19', newChart: '0.7.20', missingChartEnvPin: true });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /expected documented CHART_VERSION is missing from cilium-demos\/fault-demo\/README\.md/);
+  assert.deepEqual(result.docs, result.initialDocs);
+});
+
 test('tracked initial state matches current immutable public app, chart, and image pins', () => {
   assert.equal(initialState.kind, 'pacman-k8s-promotion-state');
   assert.equal(initialState.app.version, '0.7.16');
