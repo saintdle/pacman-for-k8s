@@ -384,6 +384,7 @@ export function assertManagedConsumerReferences({ state, compatibilityLock = nul
   const readmeChart = [...files.get('README.md').matchAll(/raw manifests use app `([^`]+)`, matching chart `([^`]+)`/g)];
   if (readmeChart.length !== 1 || readmeChart[0][2] !== state.chart.version) fail(`README.md chart version does not match promotion state ${state.chart.version}`);
   checkVersion('README.md', /Use `--version ([^`]+)` to reproduce the app\/chart pair above\./g, state.chart.version, 'Helm version');
+  checkVersion('README.md', /^Chart `([^`]+)` defaults to an all-in-one app and Service port `80`\./gm, state.chart.version, 'current chart defaults version');
   checkVersion('cilium-demos/fault-demo/README.md', /published Pac-Man chart `([^`]+)`/g, state.chart.version, 'chart version');
   checkVersion('cilium-demos/fault-demo/README.md', /releases\/tag\/pacman-([^)\s]+)/g, state.chart.version, 'chart release tag');
   checkVersion('cilium-demos/fault-demo/README.md', /^export CHART_VERSION=([^\s]+)$/gm, state.chart.version, 'CHART_VERSION');
@@ -493,11 +494,12 @@ async function main() {
       const readmePath = 'README.md';
       updateDoc(readmePath, (before) => replaceManagedVersionPin(before, readmePath, 'chart version', /(raw manifests use app `[^`]+`, matching chart `)([^`]+)(`)/g, oldChart, newChart));
       updateDoc(readmePath, (before) => replaceManagedVersionPin(before, readmePath, 'Helm version', /(Use `--version )([^`]+)(` to reproduce the app\/chart pair above\.)/g, oldChart, newChart));
+      updateDoc(readmePath, (before) => replaceManagedVersionPin(before, readmePath, 'current chart defaults version', /^(Chart `)([^`]+)(` defaults to an all-in-one app and Service port `80`\.)/gm, oldChart, newChart));
       const faultDemoPath = 'cilium-demos/fault-demo/README.md';
       for (const [name, pattern] of [
         ['chart version', /(published Pac-Man chart `)([^`]+)(`)/g],
         ['chart release tag', /(releases\/tag\/pacman-)([^)\s]+)(\))/g],
-        ['CHART_VERSION', /^(export CHART_VERSION=)([^\s]+)$/gm],
+        ['CHART_VERSION', /^(export CHART_VERSION=)([^\s]+)()$/gm],
       ]) {
         updateDoc(faultDemoPath, (before) => replaceManagedVersionPin(before, faultDemoPath, name, pattern, oldChart, newChart));
       }

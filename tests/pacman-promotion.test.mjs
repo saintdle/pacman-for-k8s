@@ -12,6 +12,7 @@ const fixture = (name) => JSON.parse(readFileSync(new URL(`./fixtures/promotion/
 const initialState = JSON.parse(readFileSync(new URL('../pacman-promotion-state.json', import.meta.url), 'utf8'));
 const promotionCli = fileURLToPath(new URL('../tools/pacman-promotion.mjs', import.meta.url));
 const promotionWorkflow = fileURLToPath(new URL('../.github/workflows/pacman-promotion.yml', import.meta.url));
+const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const current = fixture('current.json');
 const newer = fixture('newer.json');
 
@@ -100,7 +101,7 @@ function syntheticCompatibilityLock(state) {
 function managedReferences(state) {
   const image = `${state.app.image_repository}@${state.app.image_manifest_list_digest}`;
   return [...MANAGED_IMAGE_REFERENCE_PATHS, ...MANAGED_VERSION_REFERENCE_PATHS].map((path) => {
-    if (path === 'README.md') return { path, content: `The raw manifests use app \`${state.app.version}\`, matching chart \`${state.chart.version}\`, with roles pinned to \`${image}\`. Use \`--version ${state.chart.version}\` to reproduce the app/chart pair above.` };
+    if (path === 'README.md') return { path, content: `The raw manifests use app \`${state.app.version}\`, matching chart \`${state.chart.version}\`, with roles pinned to \`${image}\`.\nChart \`${state.chart.version}\` defaults to an all-in-one app and Service port \`80\`. Use \`--version ${state.chart.version}\` to reproduce the app/chart pair above.` };
     if (path === 'cilium-demos/README.md') return { path, content: `Default image: \`${image}\`.\n` };
     if (path === 'cilium-demos/scripts/deploy-demo.sh') return { path, content: `PACMAN_IMAGE="\${PACMAN_IMAGE:-${image}}"\n` };
     if (path === 'cilium-demos/fault-demo/README.md') return { path, content: `published Pac-Man chart \`${state.chart.version}\` from https://github.com/saintdle/helm-charts/releases/tag/pacman-${state.chart.version})\nexport CHART_VERSION=${state.chart.version}\n` };
@@ -114,7 +115,7 @@ function updateDocsFixture({ oldApp, newApp, oldChart, newChart, missingChartEnv
   const oldDigest = `sha256:${'a'.repeat(64)}`;
   const newDigest = `sha256:${'b'.repeat(64)}`;
   const docs = {
-    'README.md': `The raw manifests use app \`${oldApp}\`, matching chart \`${oldChart}\`, with all three\nroles pinned to \`docker.io/saintdle/pacman@${oldDigest}\`.\n\nnamespace. Use \`--version ${oldChart}\` to reproduce the app/chart pair above.\n\nExample release: app \`${oldApp}\`, chart \`${oldChart}\`.\n`,
+    'README.md': `The raw manifests use app \`${oldApp}\`, matching chart \`${oldChart}\`, with all three\nroles pinned to \`docker.io/saintdle/pacman@${oldDigest}\`.\n\nChart \`${oldChart}\` defaults to an all-in-one app and Service port \`80\`.\nnamespace. Use \`--version ${oldChart}\` to reproduce the app/chart pair above.\n\nExample release: app \`${oldApp}\`, chart \`${oldChart}\`.\n`,
     'cilium-demos/fault-demo/README.md': `The published Pac-Man chart \`${oldChart}\` from the\n[versioned chart release](https://github.com/saintdle/helm-charts/releases/tag/pacman-${oldChart})\n${missingChartEnvPin ? '' : `export CHART_VERSION=${oldChart}\n`}\nExample chart release: \`${oldChart}\`.\n`,
     'cilium-demos/README.md': `Default image: \`docker.io/saintdle/pacman@${oldDigest}\`.\n`,
     'cilium-demos/scripts/deploy-demo.sh': `PACMAN_IMAGE="\${PACMAN_IMAGE:-docker.io/saintdle/pacman@${oldDigest}}"\n`,
@@ -142,6 +143,7 @@ test('update-docs keeps app and chart pins independent when the new app version 
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.docs['README.md'], /raw manifests use app `0\.7\.17`, matching chart `0\.7\.20`/);
   assert.match(result.docs['README.md'], /--version 0\.7\.20` to reproduce/);
+  assert.match(result.docs['README.md'], /Chart `0\.7\.20` defaults to an all-in-one app and Service port `80`\./);
   assert.match(result.docs['cilium-demos/fault-demo/README.md'], /published Pac-Man chart `0\.7\.20`/);
   assert.match(result.docs['cilium-demos/fault-demo/README.md'], /releases\/tag\/pacman-0\.7\.20/);
   assert.match(result.docs['cilium-demos/fault-demo/README.md'], /export CHART_VERSION=0\.7\.20/);
@@ -151,6 +153,77 @@ test('update-docs keeps app and chart pins independent when the new app version 
     assert.ok(result.docs[path].includes(result.newDigest), `${path} should contain the new digest`);
     assert.ok(!result.docs[path].includes(result.oldDigest), `${path} should not retain the old digest`);
   }
+});
+
+test('update-docs updates real current-chart prose and passes the full managed-reference gate', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pacman-real-doc-update-'));
+  const paths = [...new Set([...MANAGED_IMAGE_REFERENCE_PATHS, ...MANAGED_VERSION_REFERENCE_PATHS])];
+  const originalDocs = new Map();
+  const state = structuredClone(initialState);
+  state.app.version = '0.7.17';
+  state.chart.version = '0.7.20';
+  const statePath = join(directory, 'candidate-state.json');
+  try {
+    for (const path of paths) {
+      const content = readFileSync(join(repositoryRoot, path), 'utf8');
+      originalDocs.set(path, content);
+      const fullPath = join(directory, path);
+      mkdirSync(dirname(fullPath), { recursive: true });
+      writeFileSync(fullPath, content);
+    }
+    writeFileSync(statePath, JSON.stringify(state));
+
+    const update = spawnSync(process.execPath, [promotionCli, 'update-docs'], {
+      cwd: directory,
+      encoding: 'utf8',
+      env: { ...process.env,
+        DOC_OLD_APP_VERSION: '0.7.16', DOC_NEW_APP_VERSION: '0.7.17',
+        DOC_OLD_CHART_VERSION: '0.7.17', DOC_NEW_CHART_VERSION: '0.7.20' },
+    });
+    const readmePath = join(directory, 'README.md');
+    const readme = readFileSync(readmePath, 'utf8');
+    const faultDemo = readFileSync(join(directory, 'cilium-demos/fault-demo/README.md'), 'utf8');
+    const chartVersionLines = faultDemo.match(/^export CHART_VERSION=.*$/gm) ?? [];
+    const chartDefaultsVersion = /^Chart `([^`]+)` defaults to an all-in-one app and Service port `80`\./m.exec(readme)?.[1] ?? null;
+    const referenceCheck = spawnSync(process.execPath, [promotionCli, 'check-references', statePath], {
+      cwd: directory, encoding: 'utf8',
+    });
+    const staleReadme = readme.replace('Chart `0.7.20` defaults', 'Chart `0.7.17` defaults');
+    writeFileSync(readmePath, staleReadme);
+    const staleDefaultsCheck = spawnSync(process.execPath, [promotionCli, 'check-references', statePath], {
+      cwd: directory, encoding: 'utf8',
+    });
+
+    assert.equal(update.status, 0, update.stderr);
+    assert.deepEqual({
+      chartVersionLines,
+      chartDefaultsVersion,
+      referenceCheckStatus: referenceCheck.status,
+      staleDefaultsMutationApplied: staleReadme !== readme,
+      staleDefaultsRejected: staleDefaultsCheck.status !== 0
+        && /README\.md current chart defaults version 0\.7\.17 does not match promotion state 0\.7\.20/.test(staleDefaultsCheck.stderr),
+    }, {
+      chartVersionLines: ['export CHART_VERSION=0.7.20'],
+      chartDefaultsVersion: '0.7.20',
+      referenceCheckStatus: 0,
+      staleDefaultsMutationApplied: true,
+      staleDefaultsRejected: true,
+    });
+
+    const expectedReadme = originalDocs.get('README.md')
+      .replace('raw manifests use app `0.7.16`, matching chart `0.7.17`', 'raw manifests use app `0.7.17`, matching chart `0.7.20`')
+      .replace('Chart `0.7.17` defaults', 'Chart `0.7.20` defaults')
+      .replace('Use `--version 0.7.17`', 'Use `--version 0.7.20`');
+    const expectedFaultDemo = originalDocs.get('cilium-demos/fault-demo/README.md')
+      .replace('published Pac-Man chart `0.7.17`', 'published Pac-Man chart `0.7.20`')
+      .replace('releases/tag/pacman-0.7.17', 'releases/tag/pacman-0.7.20')
+      .replace('export CHART_VERSION=0.7.17', 'export CHART_VERSION=0.7.20');
+    assert.equal(readme, expectedReadme, 'only the managed README version pins should change');
+    assert.equal(faultDemo, expectedFaultDemo, 'only the managed fault-demo chart pins should change');
+    for (const path of paths.filter((path) => path !== 'README.md' && path !== 'cilium-demos/fault-demo/README.md')) {
+      assert.equal(readFileSync(join(directory, path), 'utf8'), originalDocs.get(path), `${path} should remain unchanged`);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('update-docs handles identical old app and chart versions with different new versions', () => {
