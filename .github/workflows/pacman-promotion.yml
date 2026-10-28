@@ -163,8 +163,45 @@ jobs:
           sudo apt-get install --yes ripgrep
           pip install yamllint
           yamllint -d "{extends: relaxed, rules: {line-length: disable, document-start: disable, truthy: disable, comments: disable, indentation: disable}}" .
-          python3 -m unittest tests.kubeconform_schema_test
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.kubeconform_schema_test
           test -z "$(rg -l 'docker\.io/saintdle/pacman@(?!${{ steps.plan.outputs.digest }})sha256:[a-f0-9]{64}' --pcre2 --glob '*.yaml' --glob '*.yml' . || true)"
+
+      - name: Select exact generated files for proposal
+        id: proposal-paths
+        run: |
+          set -euo pipefail
+          paths=(
+            deployments/pacman-deployment.yaml
+            cilium-demos/canary-progressive-delivery/canary.yaml
+            cilium-demos/cluster-mesh-failover/clustermesh-demo.yaml
+            cilium-demos/fault-injection-resilience/fault-demo.yaml
+            cilium-demos/grpc-grpcroute/grpcroute.yaml
+            cilium-demos/load-simulation/node-user-simulator.yaml
+            cilium-demos/microservices-east-west/workloads.yaml
+            cilium-demos/runtime-security-incident/incident-demo.yaml
+            cilium-demos/tetragon-enforcement/tetragon-demo.yaml
+            cilium-demos/topology-aware-routing/topology-demo.yaml
+            README.md
+            cilium-demos/README.md
+            cilium-demos/scripts/deploy-demo.sh
+            cilium-demos/fault-demo/README.md
+            consumer-compatibility-lock.json
+            pacman-promotion-state.json
+          )
+          selected_paths=()
+          for path in "${paths[@]}"; do
+            if [[ -f "$path" ]] || git ls-files --error-unmatch -- "$path" >/dev/null 2>&1; then
+              selected_paths+=("$path")
+            elif [[ "$path" != consumer-compatibility-lock.json ]]; then
+              echo "required promotion output is missing: $path" >&2
+              exit 1
+            fi
+          done
+          {
+            echo 'paths<<EOF'
+            printf '%s\n' "${selected_paths[@]}"
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
 
       - name: Open or update the one promotion proposal PR
         if: steps.plan.outputs.action != '' && steps.plan.outputs.action != 'noop'
@@ -175,6 +212,7 @@ jobs:
           delete-branch: false
           commit-message: "chore(pacman): reconcile verified release pins"
           title: ${{ steps.plan.outputs.title }}
+          add-paths: ${{ steps.proposal-paths.outputs.paths }}
           body: |
             Automated Pac-Man promotion proposal.
 
