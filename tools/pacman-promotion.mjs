@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 const chartRepo = 'saintdle/helm-charts';
+const chartPagesBase = 'https://saintdle.github.io/helm-charts';
 const appRepo = 'saintdle/pacman';
 const imageRepo = 'docker.io/saintdle/pacman';
 const stableVersionPattern = '(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)';
@@ -184,6 +185,11 @@ async function bytes(url) {
   if (!response.ok) fail(`immutable release asset request failed (${response.status})`);
   return Buffer.from(await response.arrayBuffer());
 }
+async function publicBytes(url) {
+  const response = await fetch(url);
+  if (!response.ok) fail(`public chart publication request failed (${response.status})`);
+  return Buffer.from(await response.arrayBuffer());
+}
 async function release(repo, tag) { return (await api(`/repos/${repo}/releases/tags/${encodeURIComponent(tag)}`)).json(); }
 async function tagCommit(repo, tag) {
   let object = (await api(`/repos/${repo}/git/ref/tags/${encodeURIComponent(tag)}`)).json().then((ref) => ref.object);
@@ -222,6 +228,42 @@ async function generatedChartCandidate({ recordAsset, releaseData, packageAsset,
     chart: { version: chartVersion, reference: recordAsset.url, sha256: recordAsset.checksum, package_reference: packageAsset.url,
       package_sha256: packageAsset.checksum, source_repository: record.source.repository, source_commit: record.source.commit, format: 'chart-release-v1' },
   };
+}
+async function verifyPublishedConsumerReadiness(releaseData, candidate) {
+  const lockName = 'consumer-compatibility-lock.json';
+  const expectedLockUrl = releaseAssetUrl(chartRepo, releaseData.tag_name, lockName);
+  const lockMetadata = asset(releaseData, lockName);
+  if (lockMetadata.browser_download_url !== expectedLockUrl) fail('compatibility lock reference is not immutable');
+  if (!digestRe.test(lockMetadata.digest ?? '')) fail('compatibility lock release digest is missing or invalid');
+  const lockAsset = await verifiedAsset(releaseData, lockName);
+  if (lockAsset.url !== expectedLockUrl) fail('compatibility lock reference is not immutable');
+  let compatibilityLock;
+  try { compatibilityLock = JSON.parse(lockAsset.data.toString()); }
+  catch { fail('compatibility lock is malformed JSON'); }
+  if (!isDeepStrictEqual(compatibilityLock, makeCompatibilityLock(candidate))) {
+    fail('compatibility lock does not match verified app and chart identities');
+  }
+
+  const pagesPackageUrl = `${chartPagesBase}/pacman-${candidate.chart.version}.tgz`;
+  const [indexBytes, packageBytes] = await Promise.all([
+    publicBytes(`${chartPagesBase}/index.yaml`), publicBytes(pagesPackageUrl),
+  ]);
+  let index;
+  try {
+    index = JSON.parse(execFileSync('yq', ['-o=json', '.', '-'], { input: indexBytes, encoding: 'utf8' }));
+  } catch { fail('public Helm index is malformed'); }
+  const versions = index?.entries?.pacman;
+  const matches = Array.isArray(versions) ? versions.filter((entry) => entry?.version === candidate.chart.version) : [];
+  if (matches.length !== 1) fail('public Helm index does not contain the exact chart identity');
+  const [entry] = matches;
+  if (entry.name !== 'pacman' || entry.appVersion !== candidate.app.version
+    || entry.digest !== candidate.chart.package_sha256 || !Array.isArray(entry.urls)
+    || !entry.urls.includes(pagesPackageUrl)) fail('public Helm index does not contain the exact chart identity');
+  if (checksum(packageBytes) !== candidate.chart.package_sha256) fail('public chart package checksum does not match the immutable release asset');
+}
+function hasModernAppReleaseSignals(releaseData, metadata) {
+  return releaseData.assets.some((item) => item.name === 'app-release-record.json')
+    || ['app_record_ref', 'app_record_sha256'].some((key) => Object.hasOwn(metadata, key));
 }
 async function verifyApp(versionValue, expectedRef, expectedSha, expectedDigest) {
   version(versionValue, 'app version');
@@ -425,6 +467,8 @@ async function selectLatestChart() {
     const appRelease = await release(appRepo, `pacman-v${metadata.appVersion}`);
     verifyVersionTag(appRelease, `pacman-v${metadata.appVersion}`);
     const appMeta = await verifiedAsset(appRelease, 'release-metadata.json');
+    const appMetadata = JSON.parse(appMeta.data.toString());
+    if (hasModernAppReleaseSignals(appRelease, appMetadata)) fail('chart release record is missing for a modern app release');
     const app = await verifyApp(metadata.appVersion, appMeta.url, appMeta.checksum, metadata.imageDigest);
     return { app, chart: { version: chartVersion, reference: packageAsset.url, sha256: packageAsset.checksum,
       package_reference: packageAsset.url, package_sha256: packageAsset.checksum, source_repository: `https://github.com/${chartRepo}`,
@@ -434,7 +478,9 @@ async function selectLatestChart() {
   const generated = await generatedChartCandidate({ recordAsset, releaseData: rel, packageAsset, chartVersion });
   const appRelease = generated.appRelease;
   const app = await verifyApp(appRelease.version, appRelease.reference, appRelease.sha256);
-  return { app, chart: generated.chart };
+  const candidate = { app, chart: generated.chart };
+  await verifyPublishedConsumerReadiness(rel, candidate);
+  return candidate;
 }
 
 function readState(path) { try { return JSON.parse(readFileSync(path, 'utf8')); } catch (error) { if (error.code === 'ENOENT') return null; throw error; } }

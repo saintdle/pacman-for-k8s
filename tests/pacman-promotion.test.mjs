@@ -94,6 +94,201 @@ function rollbackFixture({ generated = true, alterRecord = (record) => record } 
   };
 }
 
+function actualCliPromotionFixture({ generated = true, scenario = 'ready', appSignal = 'record', requestedChartVersion, currentMatchesCandidate = false, prettyLock = false } = {}) {
+  const directory = mkdtempSync(join(tmpdir(), 'pacman-public-readiness-'));
+  const appVersion = generated || appSignal !== 'legacy' ? '0.7.17' : '0.7.16';
+  const chartVersion = generated ? requestedChartVersion ?? '0.7.21' : '0.7.17';
+  const appTag = `pacman-v${appVersion}`;
+  const chartTag = `pacman-${chartVersion}`;
+  const appRecordUrl = `https://github.com/saintdle/pacman/releases/download/${appTag}/app-release-record.json`;
+  const appMetadataUrl = `https://github.com/saintdle/pacman/releases/download/${appTag}/release-metadata.json`;
+  const packageReference = `https://github.com/saintdle/helm-charts/releases/download/${chartTag}/pacman-${chartVersion}.tgz`;
+  const chartRecordUrl = `https://github.com/saintdle/helm-charts/releases/download/${chartTag}/chart-release-record.json`;
+  const compatibilityLockUrl = `https://github.com/saintdle/helm-charts/releases/download/${chartTag}/consumer-compatibility-lock.json`;
+  const pagesBase = 'https://saintdle.github.io/helm-charts';
+  const pagesIndexUrl = `${pagesBase}/index.yaml`;
+  const pagesPackageUrl = `${pagesBase}/pacman-${chartVersion}.tgz`;
+  const appCommit = 'a'.repeat(40);
+  const chartCommit = 'b'.repeat(40);
+  const imageDigest = `sha256:${'c'.repeat(64)}`;
+  const appRecord = {
+    schema_version: 1, kind: 'app-release', app_version: appVersion, tag: appTag,
+    source: { repository: 'https://github.com/saintdle/pacman', commit: appCommit },
+    image: { repository: 'docker.io/saintdle/pacman', manifest_list_digest: imageDigest },
+    platforms: [
+      { platform: 'linux/amd64', digest: `sha256:${'d'.repeat(64)}` },
+      { platform: 'linux/arm64', digest: `sha256:${'e'.repeat(64)}` },
+    ],
+    provenance_reference: 'https://github.com/saintdle/pacman/actions/runs/1/attestations',
+    signature_reference: 'https://github.com/saintdle/pacman/releases/download/signatures',
+  };
+  const appRecordBytes = Buffer.from(JSON.stringify(appRecord));
+  const appRecordSha = createHash('sha256').update(appRecordBytes).digest('hex');
+  const modernMetadata = {
+    version: appVersion, tag: appTag, commit: appCommit, image_digest: imageDigest,
+    app_record_ref: appRecordUrl, app_record_sha256: appRecordSha,
+  };
+  const legacyMetadata = { version: appVersion, tag: appTag, commit: appCommit };
+  const appMetadataBytes = Buffer.from(JSON.stringify(appSignal === 'legacy' ? legacyMetadata : modernMetadata));
+  let packageBytes = Buffer.from(`offline ${generated ? 'generated' : 'legacy'} chart package ${chartVersion}`);
+  if (!generated) {
+    const packageRoot = join(directory, 'package', 'pacman');
+    mkdirSync(packageRoot, { recursive: true });
+    writeFileSync(join(packageRoot, 'Chart.yaml'), `apiVersion: v2\nname: pacman\nversion: ${chartVersion}\nappVersion: "${appVersion}"\n`);
+    writeFileSync(join(packageRoot, 'values.yaml'), `image:\n  digest: "${imageDigest}"\n`);
+    const archivePath = join(directory, 'legacy-chart.tgz');
+    execFileSync('tar', ['-czf', archivePath, '-C', join(directory, 'package'), 'pacman']);
+    packageBytes = readFileSync(archivePath);
+  }
+  const packageSha = createHash('sha256').update(packageBytes).digest('hex');
+  const chartRecord = {
+    schema_version: 1, kind: 'chart-release', chart_version: chartVersion,
+    source: { repository: 'https://github.com/saintdle/pacman', commit: chartCommit },
+    package: { filename: `pacman-${chartVersion}.tgz`, sha256: packageSha, immutable_url: packageReference },
+    app_release: { reference: appRecordUrl, sha256: appRecordSha },
+  };
+  const chartRecordBytes = Buffer.from(JSON.stringify(chartRecord));
+  const chartRecordSha = createHash('sha256').update(chartRecordBytes).digest('hex');
+  const candidate = {
+    app: {
+      version: appVersion, reference: appRecordUrl, sha256: appRecordSha,
+      source_repository: 'https://github.com/saintdle/pacman', source_commit: appCommit,
+      image_repository: 'docker.io/saintdle/pacman', image_manifest_list_digest: imageDigest, format: 'app-release-v1',
+    },
+    chart: {
+      version: chartVersion, reference: chartRecordUrl, sha256: chartRecordSha,
+      package_reference: packageReference, package_sha256: packageSha,
+      source_repository: 'https://github.com/saintdle/pacman', source_commit: chartCommit, format: 'chart-release-v1',
+    },
+  };
+  const compatibilityLock = syntheticCompatibilityLock(candidate);
+  let lockBytes = Buffer.from(JSON.stringify(compatibilityLock, null, prettyLock ? 4 : 0));
+  if (scenario === 'lock-malformed') lockBytes = Buffer.from('{');
+  if (scenario === 'lock-conflict') {
+    lockBytes = Buffer.from(JSON.stringify({ ...compatibilityLock, chart: { ...compatibilityLock.chart, package_sha256: 'f'.repeat(64) } }));
+  }
+  if (scenario === 'lock-app-conflict') {
+    lockBytes = Buffer.from(JSON.stringify({ ...compatibilityLock, app: { ...compatibilityLock.app, image_manifest_list_digest: `sha256:${'f'.repeat(64)}` } }));
+  }
+  if (scenario === 'lock-schema-mismatch') {
+    lockBytes = Buffer.from(JSON.stringify({ ...compatibilityLock, schema_version: 2 }));
+  }
+  let publicIndex = {
+    entries: { pacman: [{
+      apiVersion: 'v2', appVersion, digest: packageSha, name: 'pacman',
+      urls: [pagesPackageUrl], version: chartVersion,
+    }] },
+  };
+  if (scenario === 'index-version-missing') publicIndex.entries.pacman[0].version = '0.7.20';
+  if (scenario === 'index-app-version-mismatch') publicIndex.entries.pacman[0].appVersion = '0.7.16';
+  if (scenario === 'index-digest-mismatch') publicIndex.entries.pacman[0].digest = 'f'.repeat(64);
+  if (scenario === 'index-url-mismatch') publicIndex.entries.pacman[0].urls = ['https://example.invalid/pacman.tgz'];
+  if (scenario === 'index-malformed') publicIndex = 'not: [valid: yaml';
+  const indexBytes = Buffer.from(typeof publicIndex === 'string'
+    ? publicIndex
+    : `apiVersion: v1\nentries:\n  pacman:\n    - apiVersion: v2\n      appVersion: "${publicIndex.entries.pacman[0].appVersion}"\n      digest: ${publicIndex.entries.pacman[0].digest}\n      name: pacman\n      urls:\n        - ${publicIndex.entries.pacman[0].urls[0]}\n      version: ${publicIndex.entries.pacman[0].version}\n`);
+  const responses = {};
+  const addJson = (url, value) => { responses[url] = { json: value }; };
+  const addBytes = (url, bytes) => { responses[url] = { base64: bytes.toString('base64') }; };
+  const addStatus = (url, status) => { responses[url] = { status, text: 'offline fixture unavailable' }; };
+  const asset = (name, url, bytes, digest = `sha256:${createHash('sha256').update(bytes).digest('hex')}`) => ({ name, browser_download_url: url, digest });
+  const appAssets = [
+    ...(appSignal === 'record' ? [asset('app-release-record.json', appRecordUrl, appRecordBytes)] : []),
+    asset('release-metadata.json', appMetadataUrl, appMetadataBytes),
+  ];
+  const lockAsset = generated && scenario !== 'lock-missing'
+    ? asset('consumer-compatibility-lock.json', compatibilityLockUrl, lockBytes,
+      scenario === 'lock-digest-mismatch' ? `sha256:${'f'.repeat(64)}` : undefined)
+    : null;
+  if (scenario === 'lock-digest-missing' && lockAsset) delete lockAsset.digest;
+  if (scenario === 'lock-url-mismatch' && lockAsset) lockAsset.browser_download_url = 'https://example.invalid/consumer-compatibility-lock.json';
+  const chartAssets = [
+    asset(`pacman-${chartVersion}.tgz`, packageReference, packageBytes),
+    ...(generated ? [asset('chart-release-record.json', chartRecordUrl, chartRecordBytes)] : []),
+    ...(lockAsset ? [lockAsset] : []),
+  ];
+  addJson('https://api.github.com/repos/saintdle/helm-charts/releases?per_page=100', [{
+    tag_name: chartTag, draft: false, prerelease: false, assets: chartAssets,
+  }]);
+  addJson(`https://api.github.com/repos/saintdle/pacman/releases/tags/${appTag}`, {
+    tag_name: appTag, draft: false, prerelease: false,
+    assets: appAssets,
+  });
+  addJson(`https://api.github.com/repos/saintdle/pacman/git/ref/tags/${appTag}`, { object: { type: 'commit', sha: appCommit } });
+  addBytes(packageReference, packageBytes);
+  if (generated) {
+    addBytes(chartRecordUrl, chartRecordBytes);
+    if (lockAsset) {
+      if (scenario === 'lock-unavailable') addStatus(lockAsset.browser_download_url, 404);
+      else addBytes(lockAsset.browser_download_url, lockBytes);
+    }
+    if (scenario === 'index-missing') addStatus(pagesIndexUrl, 404);
+    else addBytes(pagesIndexUrl, indexBytes);
+    if (scenario === 'package-missing') addStatus(pagesPackageUrl, 404);
+    else addBytes(pagesPackageUrl, scenario === 'package-mismatch' ? Buffer.from('different public package bytes') : packageBytes);
+  } else {
+    addJson(`https://api.github.com/repos/saintdle/helm-charts/git/ref/tags/${chartTag}`, { object: { type: 'commit', sha: chartCommit } });
+  }
+  if (appSignal === 'record') addBytes(appRecordUrl, appRecordBytes);
+  addBytes(appMetadataUrl, appMetadataBytes);
+
+  const current = structuredClone(LEGACY_PROMOTION_STATE);
+  current.app.version = generated ? '0.7.16' : '0.7.15';
+  current.chart.version = generated ? '0.7.20' : '0.7.16';
+  current.chart.reference = `https://github.com/saintdle/helm-charts/releases/download/pacman-${current.chart.version}/pacman-${current.chart.version}.tgz`;
+  current.chart.package_reference = current.chart.reference;
+  if (currentMatchesCandidate) {
+    current.app = candidate.app;
+    current.chart = candidate.chart;
+  }
+  const currentPath = join(directory, 'current-state.json');
+  const planPath = join(directory, 'plan.json');
+  const fixturePath = join(directory, 'offline-fixture.json');
+  const callsPath = join(directory, 'calls.json');
+  const preloadPath = join(directory, 'offline-preload.mjs');
+  writeFileSync(currentPath, JSON.stringify(current));
+  writeFileSync(fixturePath, JSON.stringify({ responses, imageDigest }));
+  writeFileSync(preloadPath, `
+import fs from 'node:fs';
+import cp from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
+const fixture = JSON.parse(fs.readFileSync(process.env.PROMOTION_OFFLINE_FIXTURE, 'utf8'));
+const calls = [];
+globalThis.fetch = async (input) => {
+  const url = String(input);
+  calls.push(url);
+  fs.writeFileSync(process.env.PROMOTION_OFFLINE_CALLS, JSON.stringify(calls));
+  const response = fixture.responses[url];
+  if (!response) return new Response('deny-unknown offline request', { status: 598 });
+  if (response.status) return new Response(response.text ?? '', { status: response.status });
+  if (Object.hasOwn(response, 'json')) return Response.json(response.json);
+  return new Response(response.base64 ? Buffer.from(response.base64, 'base64') : response.text ?? '');
+};
+const originalExecFileSync = cp.execFileSync;
+cp.execFileSync = (command, args, options) => {
+  if (command === 'docker') {
+    if (args.at(-1) !== 'docker.io/saintdle/pacman@' + fixture.imageDigest) throw new Error('unexpected offline registry lookup');
+    return 'Digest: ' + fixture.imageDigest + '\\n';
+  }
+  return originalExecFileSync(command, args, options);
+};
+syncBuiltinESMExports();
+`);
+  const result = spawnSync(process.execPath, ['--import', preloadPath, promotionCli, 'plan', planPath], {
+    cwd: directory,
+    encoding: 'utf8',
+    env: { ...process.env, CURRENT_STATE_PATH: currentPath, PENDING_STATE_PATH: join(directory, 'pending.json'),
+      PROMOTION_MODE: 'reconcile', PROMOTION_OFFLINE_FIXTURE: fixturePath, PROMOTION_OFFLINE_CALLS: callsPath },
+  });
+  return {
+    ...result,
+    plan: existsSync(planPath) ? JSON.parse(readFileSync(planPath, 'utf8')) : null,
+    calls: existsSync(callsPath) ? JSON.parse(readFileSync(callsPath, 'utf8')) : [],
+    allowedUrls: Object.keys(responses),
+    cleanup: () => rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
 function syntheticTypedState() {
   const state = structuredClone(LEGACY_PROMOTION_STATE);
   state.app.format = 'app-release-v1';
@@ -820,4 +1015,85 @@ test('rollback retains explicit legacy chart compatibility and missing evidence'
   assert.deepEqual(candidate.chart.missing_evidence, ['chart-release-record', 'chart-source-identity']);
   const plan = planPromotionCandidate({ current, candidate, mode: 'rollback', reason: fixtureCase.options.reason });
   assert.equal(plan.compatibility_lock, null);
+});
+
+test('actual promotion CLI rejects generated candidates until the published lock and public chart agree', () => {
+  const cases = [
+    { scenario: 'lock-missing', message: /consumer-compatibility-lock\.json/ },
+    { scenario: 'lock-unavailable', message: /request failed \(404\)/ },
+    { scenario: 'lock-malformed', message: /compatibility lock is malformed/ },
+    { scenario: 'lock-schema-mismatch', message: /compatibility lock does not match verified app and chart identities/ },
+    { scenario: 'lock-conflict', message: /compatibility lock does not match verified app and chart identities/ },
+    { scenario: 'lock-app-conflict', message: /compatibility lock does not match verified app and chart identities/ },
+    { scenario: 'lock-url-mismatch', message: /compatibility lock reference is not immutable/ },
+    { scenario: 'lock-digest-missing', message: /compatibility lock release digest is missing or invalid/ },
+    { scenario: 'lock-digest-mismatch', message: /consumer-compatibility-lock\.json checksum does not match release metadata/ },
+    { scenario: 'index-missing', message: /public chart publication request failed \(404\)/ },
+    { scenario: 'index-malformed', message: /public Helm index is malformed/ },
+    { scenario: 'index-version-missing', message: /public Helm index does not contain the exact chart identity/ },
+    { scenario: 'index-app-version-mismatch', message: /public Helm index does not contain the exact chart identity/ },
+    { scenario: 'index-digest-mismatch', message: /public Helm index does not contain the exact chart identity/ },
+    { scenario: 'index-url-mismatch', message: /public Helm index does not contain the exact chart identity/ },
+    { scenario: 'package-missing', message: /public chart publication request failed \(404\)/ },
+    { scenario: 'package-mismatch', message: /public chart package checksum does not match the immutable release asset/ },
+  ];
+  for (const fixtureCase of cases) {
+    const run = actualCliPromotionFixture({ scenario: fixtureCase.scenario });
+    try {
+      assert.notEqual(run.status, 0, `${fixtureCase.scenario} must not produce a promotion plan`);
+      assert.match(run.stderr, fixtureCase.message, `${fixtureCase.scenario}: ${run.stderr}`);
+      assert.ok(run.calls.every((url) => run.allowedUrls.includes(url)), `${fixtureCase.scenario} attempted an unapproved offline URL`);
+      assert.equal(run.plan, null, `${fixtureCase.scenario} must not write a candidate plan`);
+    } finally { run.cleanup(); }
+  }
+});
+
+test('actual promotion CLI accepts a generated candidate only with its exact lock and public package', () => {
+  const run = actualCliPromotionFixture();
+  try {
+    assert.equal(run.status, 0, run.stderr);
+    assert.equal(run.plan.action, 'promotion');
+    assert.equal(run.plan.app.version, '0.7.17');
+    assert.equal(run.plan.chart.version, '0.7.21');
+    assert.deepEqual(run.plan.compatibility_lock, syntheticCompatibilityLock(run.plan));
+    assert.ok(run.calls.includes('https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.21/consumer-compatibility-lock.json'));
+    assert.ok(run.calls.includes('https://saintdle.github.io/helm-charts/index.yaml'));
+    assert.ok(run.calls.includes('https://saintdle.github.io/helm-charts/pacman-0.7.21.tgz'));
+    assert.ok(run.calls.every((url) => run.allowedUrls.includes(url)), 'the offline CLI attempted an unapproved URL');
+  } finally { run.cleanup(); }
+
+  const sameVersionPair = actualCliPromotionFixture({ requestedChartVersion: '0.7.20', currentMatchesCandidate: true, prettyLock: true });
+  try {
+    assert.equal(sameVersionPair.status, 0, sameVersionPair.stderr);
+    assert.deepEqual(sameVersionPair.plan, { action: 'noop', reason: 'already-promoted' });
+    assert.ok(sameVersionPair.calls.includes('https://github.com/saintdle/helm-charts/releases/download/pacman-0.7.20/consumer-compatibility-lock.json'));
+    assert.ok(sameVersionPair.calls.includes('https://saintdle.github.io/helm-charts/index.yaml'));
+    assert.ok(sameVersionPair.calls.includes('https://saintdle.github.io/helm-charts/pacman-0.7.20.tgz'));
+    assert.ok(sameVersionPair.calls.every((url) => sameVersionPair.allowedUrls.includes(url)), 'the offline current-pair CLI attempted an unapproved URL');
+  } finally { sameVersionPair.cleanup(); }
+});
+
+test('actual promotion CLI rejects a missing chart record for modern app evidence and preserves historical legacy releases', () => {
+  for (const appSignal of ['record', 'metadata']) {
+    const run = actualCliPromotionFixture({ generated: false, appSignal });
+    try {
+      assert.notEqual(run.status, 0, `${appSignal} App v1 evidence must prevent legacy chart fallback`);
+      assert.match(run.stderr, /chart release record is missing for a modern app release/);
+      assert.ok(run.calls.every((url) => run.allowedUrls.includes(url)), `${appSignal} case attempted an unapproved offline URL`);
+      assert.equal(run.plan, null);
+    } finally { run.cleanup(); }
+  }
+
+  const legacy = actualCliPromotionFixture({ generated: false, appSignal: 'legacy' });
+  try {
+    assert.equal(legacy.status, 0, legacy.stderr);
+    assert.equal(legacy.plan.action, 'promotion');
+    assert.equal(legacy.plan.app.version, '0.7.16');
+    assert.equal(legacy.plan.chart.version, '0.7.17');
+    assert.equal(legacy.plan.app.format, 'legacy-release-metadata-v0');
+    assert.equal(legacy.plan.chart.format, 'legacy-chart-package-v0');
+    assert.equal(legacy.plan.compatibility_lock, null);
+    assert.ok(!legacy.calls.some((url) => url.startsWith('https://saintdle.github.io/helm-charts/')));
+    assert.ok(legacy.calls.every((url) => legacy.allowedUrls.includes(url)), 'the historical offline CLI attempted an unapproved URL');
+  } finally { legacy.cleanup(); }
 });
