@@ -31,8 +31,8 @@ sources. `saintdle/pacman` maintains the app and editable chart source, while
 
 ## Image
 
-The raw manifests use app `0.7.16`, matching chart `0.7.17`, with all three
-roles pinned to `docker.io/saintdle/pacman@sha256:592740129bce7530a347146b86647f8b516df3c19105aa4c2fe40b878840fccf`.
+The raw manifests use app `0.7.17`, matching chart `0.7.20`, with all three
+roles pinned to `docker.io/saintdle/pacman@sha256:2a55f4d74bc05dea3ae05912fbdcbe9348f9aafb752902054a7f066cfa112f68`.
 The released image includes the opt-in fault and synthetic security-probe
 runtime; the chart keeps these controls disabled by default. Promotion updates
 retain the shared image pin. The Cilium demo wrapper accepts a `PACMAN_IMAGE`
@@ -112,10 +112,10 @@ The chart packages the same modernized Pac-Man image used by the manifests
 in this repo (pinned by digest, Pod Security Standards `restricted`),
 and supports both the MongoDB and PostgreSQL backends.
 
-Chart `0.7.17` defaults to an all-in-one app and Service port `80`. To use its
+Chart `0.7.20` defaults to an all-in-one app and Service port `80`. To use its
 split roles, set `--set roles.enabled=true`. The raw-manifest migration and
 uninstall modes do not manage Helm releases; install Helm into a separate
-namespace. Use `--version 0.7.17` to reproduce the app/chart pair above.
+namespace. Use `--version 0.7.20` to reproduce the app/chart pair above.
 The Helm cleanup mode requires Python 3, Helm 3, and `kubectl`.
 
 ```bash
